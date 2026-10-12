@@ -66,6 +66,9 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 | `project_inspect` | both | bins and items with ids, types, durations; active sequence |
 | `sequence_inspect` | both | the active sequence: tracks, clips (`start` / `end` and `sourceIn` / `sourceOut` in ticks, frames, `speed`, `reverse`: the clip plays its `sourceIn` to `sourceOut` stretch backward, `gainDb`), effects, transitions, markers (name and `comment`), playhead, selection |
 | `media_import` | both | import files by absolute path (`paths`, an array; optional `bin`, `image_sequence`) |
+| `media_inspect` | both | source metadata, full-content version, decoder analysis capabilities; `item`, optional `expected_version`, `request_id`, `wait` |
+| `media_frames` | both | source PNG image blocks with exact source timestamps; no timeline placement required |
+| `media_analysis_result` | both | poll `{job}` and retrieve completed image blocks |
 | `render_frame` | both | PNG of the program frame at `seconds` (headless renders; bridge screenshots the Program monitor). Read-only: the playhead and selection are left as they were |
 | `ui_inspect` | bridge | UI state: tool, workspace, panels, zoom, playback, fps |
 | `ui_elements` | bridge | on-screen interactive elements with id, label and rect (`prefix` filter) |
@@ -101,6 +104,55 @@ driven one app can drive the others.
   `filmcraft://commands` (the command catalog, as `command_list`), both `application/json`. For MCP
   2026-07-28 clients such as current Claude Code, list and read results carry the `ttlMs` and
   `cacheScope` hints that revision requires.
+
+### Source analysis: thumbnails before editing
+
+Use `media_import`, then `media_inspect {item}` and `media_frames {item}`. The analysis tools
+leave the project, playhead, selection, history and active trims unchanged. `readOnlyHint` refers
+to project and source files: analysis still creates background jobs and an in-memory cache.
+The decoder's `analysis_capabilities.frames` indicates verified presentation-time support;
+an individual corrupt frame can still fail. Short video output is not implemented in P0.
+
+```json
+{"item":12,"strategy":"uniform","start_ticks":"0","end_ticks":"2540160000000","max_frames":8,"max_side":512,"wait":true}
+```
+
+`uniform` samples the half-open source interval; omit both endpoints to cover the item's source
+range. `timestamps` instead takes `times_ticks`, an array of nonnegative decimal Tick strings.
+There are 254016000000 ticks per second. A subclip's times are absolute source times, not relative
+to the subclip or sequence. Defaults are 8 frames and a 512-pixel longest side; limits are 16 frames
+and 1920 pixels. Unknown fields, null options, invalid ranges and oversized limits are errors.
+
+Metadata appears in `structuredContent` and the first text block. Each frame's `content_index`
+points to a PNG image block in `content`; PNG bytes are not duplicated in metadata. `actual_ticks`
+is the decoded source presentation time, while `requested_ticks` and `request_indices` preserve
+all requests consolidated into that frame. Partial failures retain successful frames and list
+errors. The final MCP result is below 8 MiB (including a 4 KiB envelope reserve). Budget truncation
+removes whole images and returns `remaining_times_ticks`; retry those times explicitly with a
+smaller `max_side`. Do not treat an image path or an empty successful page as visual evidence.
+
+Both tools default to `wait=true`, polling without holding the Session or Bridge connection lock.
+`wait=false` returns `{job, request_id}` immediately; poll `media_analysis_result {job}`.
+`command_run` with `jobs.list` returns status without image bytes; `jobs.cancel {job}` cancels a
+specific job. MCP cancellation of a waiting analysis cancels only that request's job and never
+removes source files or export outputs. The worker reports a terminal cancelled/error state.
+
+`source_version` is SHA256 over complete source content (ordered files and gaps for sequences).
+Every request hashes before and after generation or cache lookup; `expected_version` rejects
+changed media. Hashing costs remain on cache hits and are reported in `timings_ms`. Decode/encoding
+results use an LRU cache bounded to 32 pages / 128 MiB. `media.analysis.clearCache {}` via
+`command_run` removes unused pages. Expired results return `RESULT_EXPIRED`; a new explicit request
+is required. At most one analysis runs and eight wait. Session job/receipt storage is capped at
+10000; start a new session if this limit is reached.
+
+Reuse a `request_id` only with identical parameters. Same-id retries return the existing job;
+changed parameters return `REQUEST_ID_CONFLICT`, even after cancellation or failure. Bridge inserts
+an id before transport retries, including raw `command_run` starts. For retries made by the client
+across separate tool calls, supply your own stable id. Headless and Bridge use the same engine
+analysis pipeline. Bridge response lines have a finite 16 MiB limit; oversize replies discard the
+connection and fail without automatic replay.
+
+Image blocks and the metadata copies follow the [MCP tool-result specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
 
 ### Long exports: progress and cancellation
 

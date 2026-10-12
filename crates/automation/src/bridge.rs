@@ -39,6 +39,7 @@ impl BridgeClient {
     /// (#91, #92). The reply is the same as a blocking export's: `{job, path, result}`, or the
     /// export's error.
     pub async fn execute(&self, id: &str, mut params: Value) -> Result<Value, AutomationError> {
+        crate::media_analysis::ensure_request_id(id, &mut params);
         if !crate::long_job::is_long(id, &params) {
             return self.call("engine.execute", json!({"command": id, "params": params})).await;
         }
@@ -85,12 +86,9 @@ impl BridgeClient {
             let line = format!("{}\n", json!({"id": id, "method": method, "params": params}));
             let res: Result<Value, AutomationError> = async {
                 conn.1.write_all(line.as_bytes()).await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
-                let mut buf = String::new();
-                tokio::time::timeout(Duration::from_secs(90), conn.0.read_line(&mut buf))
-                    .await
-                    .map_err(|_| AutomationError::Bridge("timeout".into()))?
-                    .map_err(|e| AutomationError::Bridge(e.to_string()))?;
-                serde_json::from_str(&buf).map_err(|e| AutomationError::Bridge(format!("bad reply: {e}")))
+                let buf =
+                    tokio::time::timeout(Duration::from_secs(90), read_reply(&mut conn.0)).await.map_err(|_| AutomationError::Bridge("timeout".into()))??;
+                serde_json::from_slice(&buf).map_err(|e| AutomationError::Bridge(format!("bad reply: {e}")))
             }
             .await;
             match res {
@@ -101,14 +99,40 @@ impl BridgeClient {
                         Err(AutomationError::App(v.get("error").and_then(Value::as_str).unwrap_or("error").to_string()))
                     };
                 }
-                Err(e) if attempt == 0 => {
+                Err(e) if attempt == 0 && !matches!(e, AutomationError::ResponseLimit) => {
                     *guard = None;
                     let _ = e;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    *guard = None;
+                    return Err(e);
+                }
             }
         }
         Err(AutomationError::Bridge("unreachable".into()))
+    }
+}
+
+/// Control replies are larger than request lines (PNG/base64), but never unbounded.
+const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
+async fn read_reply<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, AutomationError> {
+    let mut output = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
+        if chunk.is_empty() {
+            return Err(AutomationError::Bridge("connection closed before complete reply".into()));
+        }
+        let newline = chunk.iter().position(|b| *b == b'\n');
+        let count = newline.map_or(chunk.len(), |n| n + 1);
+        if count > MAX_REPLY_BYTES.saturating_sub(output.len()) {
+            return Err(AutomationError::ResponseLimit);
+        }
+        output.try_reserve(count).map_err(|_| AutomationError::ResponseLimit)?;
+        output.extend_from_slice(chunk.get(..count).ok_or(AutomationError::ResponseLimit)?);
+        reader.consume(count);
+        if newline.is_some() {
+            return Ok(output);
+        }
     }
 }
 

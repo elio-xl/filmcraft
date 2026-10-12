@@ -466,7 +466,7 @@ impl MediaSource for Mp4Source {
         Ok(f)
     }
 
-    fn analysis_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>, MediaError> {
+    fn analysis_support(&self) -> Result<(), MediaError> {
         let ti = self.vtrack.ok_or(MediaError::NoStream("video"))?;
         let track = self.file.tracks.get(ti).ok_or(MediaError::NoStream("video"))?;
         // The demuxer's edit_offset models leading empty edits and one unit-rate media edit.
@@ -481,6 +481,15 @@ impl MediaSource for Mp4Source {
         if !track.edits.is_empty() && !media_edit {
             return Err(MediaError::Unsupported("edit list presents no video media".into()));
         }
+        if track.timescale == 0 {
+            return Err(MediaError::Decode("invalid analysis timescale".into()));
+        }
+        Ok(())
+    }
+    fn analysis_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>, MediaError> {
+        self.analysis_support()?;
+        let ti = self.vtrack.ok_or(MediaError::NoStream("video"))?;
+        let track = self.file.tracks.get(ti).ok_or(MediaError::NoStream("video"))?;
         if req.time.0 < 0 || track.timescale == 0 {
             return Err(MediaError::Decode("invalid analysis time or timescale".into()));
         }

@@ -101,10 +101,11 @@ impl MediaSource for StillSource {
     fn video_frame(&self, _req: FrameRequest) -> Result<Arc<VideoFrame>> {
         Ok(self.frame.clone())
     }
+    fn analysis_support(&self) -> Result<()> {
+        if self.analysis_supported { Ok(()) } else { Err(MediaError::Unsupported("analysis currently supports PNG and JPEG stills".into())) }
+    }
     fn analysis_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>> {
-        if !self.analysis_supported {
-            return Err(MediaError::Unsupported("analysis currently supports PNG and JPEG stills".into()));
-        }
+        self.analysis_support()?;
         if req.time.0 < 0 {
             return Err(MediaError::Decode("negative analysis time".into()));
         }

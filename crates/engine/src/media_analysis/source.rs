@@ -279,6 +279,7 @@ pub fn inspect(source: &AnalysisSource) -> Result<Value> {
     if info.audio_streams.len() > filmcraft_media::MAX_AUDIO_STREAMS {
         return Err(failure("RESOURCE_LIMIT", "too many audio streams", false));
     }
+    let frame_support = source.source.analysis_support();
     let video = info.video.as_ref().map(|v| {
         let rate = (info.kind != MediaKind::Still && v.frame_rate.num > 0 && v.frame_rate.den > 0).then_some(v.frame_rate);
         json!({"width":v.width,"height":v.height,"frame_rate":rate,"pixel_aspect":{"num":v.par.0,"den":v.par.1},
@@ -290,6 +291,11 @@ pub fn inspect(source: &AnalysisSource) -> Result<Value> {
         "coordinate_space":"source","duration_ticks":source.source_duration.0.to_string(),"duration_origin":source.duration_origin,
         "source_range":{"start_ticks":start.0.to_string(),"end_ticks":end.0.to_string()},
         "video":video,"audio_streams":info.audio_streams,"file_size":info.file_size,
+        "analysis_capabilities":{
+            "inspect":{"supported":true},
+            "frames":{"supported":frame_support.is_ok(),"reason":frame_support.err().map(|error|error.to_string())},
+            "preview_video":{"supported":false,"reason":"short-video analysis is not implemented in P0"}
+        },
         "rotation_degrees":null,"encoded_size":null,"display_size":null,
         "unavailable_reasons":{
             "rotation_degrees":"the source metadata interface does not expose container or EXIF orientation",

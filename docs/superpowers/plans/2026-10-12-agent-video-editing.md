@@ -149,12 +149,12 @@ AE01 至 AE06 共享接口，默认按顺序实施；采用多执行者时须使
 
 **Interfaces:** 注册 `media_inspect`、`media_frames`、`media_analysis_result`。新增 `media_analysis::to_tool_result(page: Value) -> Result<CallToolResult, AutomationError>`，根据共同契约生成图片块和结构化元数据。wait 模式采用独立的分析轮询函数，不复用带导出文件删除逻辑的 `run_long`。
 
-- [ ] 写 `mcp_analysis_returns_images_and_metadata`：图片块 MIME 为 image/png，解码后尺寸正确，content_index 能对应每帧，文字中没有重复 base64；空结果为 isError，部分成功显式 partial。
-- [ ] 写 `bridge_retry_reuses_analysis_request`：模拟服务已启动任务但响应断开，重连后相同 request_id 和参数返回原 job，工作队列只有一个任务；同 ID 不同参数返回冲突。已过期的请求返回过期错误，不悄悄重做。
-- [ ] 写 `bridge_analysis_does_not_seek`：Headless 与模拟 Bridge 返回等价帧元数据；调用日志中无 playhead.set、插入片段或 UI 点击。write-free 工具注解和严格未知参数测试一并覆盖。
-- [ ] 运行 `cargo test -p filmcraft-automation media_analysis` 确认失败；实现 start/poll/result，等待间释放连接及 Session 锁。取消只取消自身 job。请求标识与去重放在引擎队列，覆盖 Bridge 的自动重连重发。
-- [ ] 在 MCP 适配层核算包含元数据的最终 8 MiB 限额；超限按整帧减少并合并 remaining_times_ticks，禁止截断字节。Bridge 增加有界响应读取，针对分析响应使用足够的有限上限，不将现有 4 MiB 请求行限制误当作响应限制。
-- [ ] 更新引擎命令和工具文档，明确缓存、任务和 readOnlyHint 的含义；运行 automation、CLI 回归及 `cargo xtask ci`，提交 `AE06: Expose source analysis over MCP and bridge`。
+- [x] 写 `mcp_analysis_returns_images_and_metadata`：图片块 MIME 为 image/png，解码后尺寸正确，content_index 能对应每帧，文字中没有重复 base64；空结果为 isError，部分成功显式 partial。
+- [x] 写 `bridge_retry_reuses_analysis_request`：模拟服务已启动任务但响应断开，重连后相同 request_id 和参数返回原 job，工作队列只有一个任务；同 ID 不同参数返回冲突。已过期的请求返回过期错误，不悄悄重做。
+- [x] 写 `bridge_analysis_does_not_seek`：Headless 与模拟 Bridge 返回等价帧元数据；调用日志中无 playhead.set、插入片段或 UI 点击。write-free 工具注解和严格未知参数测试一并覆盖。
+- [x] 运行 `cargo test -p filmcraft-automation media_analysis` 确认失败；实现 start/poll/result，等待间释放连接及 Session 锁。取消只取消自身 job。请求标识与去重放在引擎队列，覆盖 Bridge 的自动重连重发。
+- [x] 在 MCP 适配层核算包含元数据的最终 8 MiB 限额；超限按整帧减少并合并 remaining_times_ticks，禁止截断字节。Bridge 增加有界响应读取，针对分析响应使用足够的有限上限，不将现有 4 MiB 请求行限制误当作响应限制。
+- [x] 更新引擎命令和工具文档，明确缓存、任务和 readOnlyHint 的含义；运行 automation、CLI 回归及 `cargo xtask ci`，提交 `AE06: Expose source analysis over MCP and bridge`。
 
 ## AE07 可重复的自动剪辑验收
 

@@ -12,6 +12,7 @@
 
 pub mod bridge;
 pub mod long_job;
+pub mod media_analysis;
 pub mod server;
 
 pub use bridge::BridgeClient;
@@ -25,6 +26,8 @@ pub enum AutomationError {
     Engine(#[from] filmcraft_engine::EngineError),
     #[error("bridge: {0}")]
     Bridge(String),
+    #[error("bridge reply exceeds the bounded response capacity")]
+    ResponseLimit,
     #[error("app: {0}")]
     App(String),
     #[error("{0}")]

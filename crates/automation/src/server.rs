@@ -151,6 +151,63 @@ pub struct MediaImportParams {
     pub image_sequence: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MediaInspectParams {
+    /// Imported project item id (positive integer).
+    pub item: u64,
+    /// Return a job immediately when false; defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+    /// Retry receipt, at most 128 characters. Reuse only with identical parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Reject changed source content before analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MediaFramesParams {
+    /// Imported project item id (positive integer).
+    pub item: u64,
+    /// Return a job immediately when false; defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+    /// Retry receipt, at most 128 characters. Reuse only with identical parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Reject changed source content before analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+    /// uniform (default) or timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Source range start, nonnegative decimal Tick string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ticks: Option<String>,
+    /// Exclusive source range end, decimal Tick string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ticks: Option<String>,
+    /// Source timestamps, decimal Tick strings; requires timestamps strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub times_ticks: Option<Vec<String>>,
+    /// Longest side: 1..1920, default 512.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_side: Option<u32>,
+    /// Frame count: 1..16, default 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frames: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisResultParams {
+    /// Job id returned by media_inspect or media_frames.
+    pub job: u64,
+}
+
 /// `file.import` params for a `media_import` call.
 fn media_import_params(p: MediaImportParams) -> Value {
     let mut params = json!({"paths": p.paths});
@@ -401,6 +458,38 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Inspect source media",
+        description = "Inspect source metadata and SHA256 content version without changing the timeline. Background job; wait defaults to true.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn media_inspect(&self, Parameters(p): Parameters<MediaInspectParams>) -> Result<CallToolResult, McpError> {
+        let params = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        Ok(self.run_analysis("media.analysis.inspect", params, None).await.unwrap_or_else(fail))
+    }
+
+    #[tool(
+        title = "Read source thumbnails",
+        description = "Return timestamped source PNG image blocks, without seeking or editing. Defaults: uniform sampling, 8 frames, max_side 512; maxima 16 frames and 1920 pixels. Source ticks are decimal strings. At most 8 MiB; partial pages include remaining_times_ticks.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn media_frames(&self, Parameters(p): Parameters<MediaFramesParams>) -> Result<CallToolResult, McpError> {
+        let params = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        Ok(self.run_analysis("media.analysis.frames", params, None).await.unwrap_or_else(fail))
+    }
+
+    #[tool(
+        title = "Read source analysis job",
+        description = "Poll a media analysis job. Returns status, metadata and completed PNG image blocks; expired results fail explicitly.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn media_analysis_result(&self, Parameters(p): Parameters<AnalysisResultParams>) -> Result<CallToolResult, McpError> {
+        Ok(match self.run("media.analysis.result", json!({"job":p.job})).await {
+            Ok(page) => crate::media_analysis::to_tool_result(page).unwrap_or_else(fail),
+            Err(error) => fail(error),
+        })
+    }
+
+    #[tool(
         title = "Import media",
         description = "Import media files by absolute path (MP4/MOV, WAV/MP3/FLAC/AIFF/Ogg, PNG/JPEG/…).",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
@@ -584,7 +673,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Use `media_inspect` and `media_frames` to read source metadata and thumbnail image blocks without timeline edits; `media_analysis_result` polls asynchronous analysis jobs. Source-analysis Tick values are decimal strings. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`).";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -613,6 +702,14 @@ impl ServerHandler for FilmcraftMcp {
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
         if let Some(m) = self.unknown_arg(&request.name, request.arguments.as_ref()) {
             return Err(McpError::invalid_params(m, None));
+        }
+        if let Some(command) = match request.name.as_ref() {
+            "media_inspect" => Some("media.analysis.inspect"),
+            "media_frames" => Some("media.analysis.frames"),
+            _ => None,
+        } {
+            let params = Value::Object(request.arguments.clone().unwrap_or_default());
+            return Ok(self.run_analysis(command, params, Some(&context)).await.unwrap_or_else(fail).into());
         }
         // A blocking export reports progress and can be cancelled (docs/agents.md § Long exports).
         // Bridge mode too: the app runs it as a job, so it stays responsive (#91, #92).
@@ -999,3 +1096,7 @@ mod tests {
         assert_ne!(r.is_error, Some(true));
     }
 }
+
+#[cfg(test)]
+#[path = "media_analysis_tests.rs"]
+mod media_analysis_tests;

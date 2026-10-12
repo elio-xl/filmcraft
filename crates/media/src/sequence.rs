@@ -215,6 +215,9 @@ impl MediaSource for ImageSequenceSource {
         Err(last_err.unwrap_or(MediaError::NoStream("video")))
     }
 
+    fn analysis_support(&self) -> Result<()> {
+        Ok(())
+    }
     fn analysis_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>> {
         if req.time.0 < 0 {
             return Err(MediaError::Decode("negative analysis time".into()));

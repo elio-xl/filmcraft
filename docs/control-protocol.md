@@ -159,10 +159,30 @@ sequence as tone-mapped SDR.
 Ctrl), `Ctrl` (macOS ⌃), `Alt`, `Shift`. The dialog (Edit ▸ Keyboard Shortcuts…, ⌥⌘K) uses ids
 `shortcuts.*` (`shortcuts.key.K`, `shortcuts.cell.<command>`, `shortcuts.ok`, …).
 
+## Source media analysis commands
+
+These `engine.execute` commands use the same read-only analysis queue in the desktop and headless
+engine. Starting a job performs no decoding or hashing on the caller/UI thread.
+
+| Command | Parameters | Result |
+|---|---|---|
+| `media.analysis.inspect` | `{item, request_id?, expected_version?}` | `{job, request_id}` |
+| `media.analysis.frames` | `{item, request_id?, expected_version?, strategy?, start_ticks?, end_ticks?, times_ticks?, max_frames?, max_side?}` | `{job, request_id}` |
+| `media.analysis.result` | `{job}` | pending status or a complete/partial/error page |
+| `media.analysis.clearCache` | `{}` | unused cache entries/bytes removed |
+| `jobs.list` | `{}` | legacy and analysis jobs; no image payloads |
+| `jobs.cancel` | `{job}` | cancellation request; does not commit a live trim or create undo history |
+
+Engine commands never accept `wait`: waiting is the MCP adapter's responsibility. Source Tick
+values are decimal strings. Frame pages contain PNG base64; MCP exposes these bytes as image blocks.
+See [source analysis](agents.md#source-analysis-thumbnails-before-editing) for limits, sampling,
+version checks, deduplication, cancellation and expiry behavior. Source analysis is independent of
+timeline previews and does not seek, select or insert clips.
+
 ## MCP
 `filmcraft-cli mcp` serves MCP on stdio: headless (in-process session; `--demo` / `--project p.fcproj`)
 or `--bridge 127.0.0.1:9876` to drive the running app. Tools: `command_list`, `command_run`,
-`command_batch`, `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`, `media_import`,
+`command_batch`, `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`, `media_import`, `media_inspect`, `media_frames`, `media_analysis_result`,
 `render_frame`, `ui_inspect`, `ui_elements`, `ui_click`, `ui_drag`, `ui_key`, `ui_type`, `ui_screenshot`,
 `ui_control`; resources `filmcraft://document` and `filmcraft://commands`. `.mcp.json` registers both.
 Annotations, argument checking, errors and export progress / cancellation:

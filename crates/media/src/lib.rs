@@ -156,6 +156,11 @@ impl FrameRequest {
 
 pub trait MediaSource: Send + Sync {
     fn info(&self) -> &MediaInfo;
+    /// Whether this source can supply verified source frames. This checks capability only;
+    /// individual frames can still fail to decode.
+    fn analysis_support(&self) -> Result<()> {
+        Err(MediaError::Unsupported("verified source presentation timestamps are unavailable".into()))
+    }
     /// A source frame with its verified presentation time in `VideoFrame::pts`.
     /// Sources must opt in; an informational or requested timestamp is not sufficient.
     fn analysis_frame(&self, _req: FrameRequest) -> Result<Arc<VideoFrame>> {
