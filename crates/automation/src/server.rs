@@ -401,7 +401,13 @@ impl FilmcraftMcp {
     }
 
     /// Run an engine command on whichever backend.
-    pub async fn run(&self, id: &str, params: Value) -> Result<Value, AutomationError> {
+    pub async fn run(&self, id: &str, mut params: Value) -> Result<Value, AutomationError> {
+        let session =
+            if crate::edit_plan::needs_session(id, &params) { Some(self.run_raw("edit.plan.session", json!({})).await?["session_id"].clone()) } else { None };
+        crate::edit_plan::identity(id, &mut params, session)?;
+        self.run_raw(id, params).await
+    }
+    async fn run_raw(&self, id: &str, params: Value) -> Result<Value, AutomationError> {
         match &*self.backend {
             Backend::Headless(s) => {
                 let s = s.clone();
@@ -787,7 +793,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Use `media_inspect` and `media_frames` to read source metadata and thumbnail image blocks without timeline edits; `media_analysis_result` polls asynchronous analysis jobs. Use `media_preview_clip` for short previews; unknown video capability defaults to PNG evidence. Source-analysis Tick values are decimal strings. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Use `media_inspect` and `media_frames` to read source metadata and thumbnail image blocks without timeline edits; `media_analysis_result` polls asynchronous analysis jobs. Use `media_preview_clip` for short previews; unknown video capability defaults to PNG evidence. Use command_run edit.plan.validate/apply with explicit steps for atomic edits and one undo; keep the returned request_id/session_id for retries. Query edit.plan.session for exact revision; SESSION_EXPIRED requires re-reading the document. Source-analysis and editing-plan Tick values are decimal strings. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`).";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -835,6 +841,9 @@ impl ServerHandler for FilmcraftMcp {
             && let Some(id) = a.get("id").and_then(Value::as_str)
         {
             let params = a.get("params").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+            if crate::edit_plan::is_plan(id) {
+                return Ok(self.run_edit_plan(id, params, Some(&context)).await.unwrap_or_else(fail).into());
+            }
             if crate::long_job::is_long(id, &params) {
                 return Ok(self.run_long(id, params, &context).await.into());
             }

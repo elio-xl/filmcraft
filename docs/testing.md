@@ -354,3 +354,12 @@ thread's CPU time, so it runs with the rest of the suite. Hosts without a per-th
 explicitly with
 `cargo test --release -p filmcraft-render --lib perf_24_tracks_3_effects_realtime_factor -- --ignored --nocapture`
 and record the machine with the result.
+
+P1 transaction qualification: `cargo test -p filmcraft-engine edit_plan` covers the fixed
+allowlist, hostile JSON, read-only validation, editor equivalence, single undo/redo, injected
+step panic, user/source races, shared graphics, actual recovery snapshots, receipt cache expiry,
+1024-commit/8-MiB caps, and old-session rejection. `cargo test -p filmcraft-automation edit_plan`
+uses a real loopback Bridge connection that commits and drops its reply before reconnecting.
+The CLI `agent_editing` integration test finalizes its title through a validated transaction and
+retries the committed request, then renders/exports as before. `failed_atomic_plan_retains_no_partial_edits`
+compares the same failing caption edits with legacy `command_batch` through actual stdio MCP.

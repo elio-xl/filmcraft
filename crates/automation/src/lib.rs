@@ -11,6 +11,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod bridge;
+pub mod edit_plan;
 pub mod long_job;
 pub mod media_analysis;
 pub mod server;
@@ -45,3 +46,6 @@ pub fn png_rgba(w: u32, h: u32, rgba: Vec<u8>, max_side: u32) -> Result<Vec<u8>,
     img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| AutomationError::Other(e.to_string()))?;
     Ok(out.into_inner())
 }
+
+#[cfg(test)]
+mod edit_plan_tests;

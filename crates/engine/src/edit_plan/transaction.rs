@@ -59,7 +59,7 @@ pub(super) struct Ready {
     // Retain the actual opened/verified source handles until commit or discard.
     pub sources: Vec<AnalysisSource>,
 }
-pub(super) fn commit(s: &mut Session, ready: Ready) -> Result<Value> {
+pub(super) fn commit(s: &mut Session, ready: Ready, reserve: impl FnOnce(&Value) -> Result<()>) -> Result<Value> {
     let Ready { snapshot, candidate, guards, sources } = ready;
     if snapshot.revision != s.revision {
         return Err(failure("REVISION_MISMATCH", "user edits superseded this plan; read the document again", false));
@@ -94,6 +94,7 @@ pub(super) fn commit(s: &mut Session, ready: Ready) -> Result<Value> {
     if crate::media_analysis::cache::serialized_size(&report)? > 1024 * 1024 {
         return Err(failure("RESOURCE_LIMIT", "commit report exceeds 1 MiB", false));
     }
+    reserve(&report)?;
     s.edit("Apply Editing Plan", move |p, state| {
         *p = candidate.project;
         if selection {

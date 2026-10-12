@@ -238,11 +238,24 @@ fn agent_editing_round_trip() {
         .chain([
             json!({"id":"timeline.place","params":{"item":items[3],"track":"V1","seconds":27,"duration":3*TPS,"audio":false}}),
             json!({"id":"timeline.place","params":{"item":items[4],"track":"A1","seconds":0,"duration":30*TPS,"video":false}}),
-            json!({"id":"graphics.newText","params":{"text":"Agent cut","newClip":true,"track":1,"time":0,"seconds":3,"position":[640,650],"size":60}}),
+            json!({"id":"graphics.newText","params":{"text":"Draft title","newClip":true,"track":1,"time":0,"seconds":3,"position":[640,650],"size":60}}),
         ])
         .collect();
     let batch = metadata(&client.good("command_batch", json!({"steps":steps})));
     assert_eq!(batch["completed"], 6);
+    let initial = metadata(&client.good("sequence_inspect", json!({})));
+    let title = initial["video"][1]["items"][0]["clip"].clone();
+    let session = client.run("edit.plan.session", json!({}));
+    let plan = json!({"session_id":session["session_id"],"request_id":"ae07-title-final","expected_revision":session["revision"],"source_versions":[],"wait":true,
+        "steps":[{"id":"graphics.set","params":{"clip":title,"layer":0,"time":"0","props":{"text":"Agent cut"}},"reason":"final title after reviewing source evidence"}]});
+    let mut preflight = plan.clone();
+    preflight["request_id"] = json!("ae07-title-preflight");
+    assert_eq!(client.run("edit.plan.validate", preflight)["committed"], false);
+    let committed = client.run("edit.plan.apply", plan.clone());
+    assert_eq!(committed["committed"], true);
+    let after_commit = metadata(&client.good("project_inspect", json!({})));
+    assert_eq!(client.run("edit.plan.apply", plan), committed, "retry must return original commit result");
+    assert_eq!(metadata(&client.good("project_inspect", json!({}))), after_commit);
     let sequence = metadata(&client.good("sequence_inspect", json!({})));
     assert_eq!(sequence["duration"], 30 * TPS);
     assert_eq!(sequence["durationFrames"], 750);
@@ -483,4 +496,28 @@ fn source_preview_video_and_png_fallback_round_trip() {
     std::fs::write(dir.join("preview-measurements.json"), serde_json::to_vec_pretty(&json!({"png_wall_ms":png_ms,"video_wall_ms":started.elapsed().as_millis(),"video_bytes":data.len(),"fallback_frames":frames.len(),"client":"Rust stdio acceptance client","model_video_consumption":"not tested"})).unwrap()).unwrap();
     std::fs::write(dir.join("mcp-transcript.json"), serde_json::to_vec(&client.transcript).unwrap()).unwrap();
     println!("P1 preview artifacts: {}", dir.display());
+}
+
+#[test]
+fn failed_atomic_plan_retains_no_partial_edits() {
+    let mut client = Mcp::start(&[]);
+    client.run("file.newSequence", json!({"name":"Atomic recovery","fps":25}));
+    let caption = client.run("captions.add", json!({"text":"original"}))["caption"].clone();
+    let session = client.run("edit.plan.session", json!({}));
+    let before = metadata(&client.good("project_inspect", json!({})));
+    let history = client.run("history.list", json!({}));
+    let captions = client.run("captions.list", json!({}));
+    let steps = json!([{"id":"captions.setText","params":{"caption":caption,"text":"partial edit"},"reason":"first step"},{"id":"captions.setText","params":{"caption":u64::MAX,"text":"missing target"},"reason":"second step fails"}]);
+    let reply=client.call("command_run",json!({"id":"edit.plan.apply","params":{"session_id":session["session_id"],"request_id":"ae07-failure","expected_revision":session["revision"],"source_versions":[],"steps":steps,"wait":true}}));
+    assert_eq!(reply["isError"], true);
+    assert_eq!(metadata(&reply)["committed"], false);
+    assert!(metadata(&reply)["error"]["message"].as_str().unwrap().contains("step 1"));
+    assert_eq!(metadata(&client.good("project_inspect", json!({}))), before);
+    assert_eq!(client.run("history.list", json!({})), history);
+    assert_eq!(client.run("captions.list", json!({})), captions);
+    let legacy = steps.as_array().unwrap().iter().map(|s| json!({"id":s["id"],"params":s["params"]})).collect::<Vec<_>>();
+    let reply = client.call("command_batch", json!({"steps":legacy}));
+    assert_eq!(reply["isError"], true);
+    assert_eq!(metadata(&reply)["completed"], 1);
+    assert!(client.run("captions.list", json!({})).to_string().contains("partial edit"));
 }

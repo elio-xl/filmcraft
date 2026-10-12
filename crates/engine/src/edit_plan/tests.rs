@@ -20,7 +20,8 @@ fn snapshot(s: &Session) -> Value {
 fn wait(s: &mut Session, command: &str, job: &Value) -> Value {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let page = s.execute(command, json!({"job":job})).unwrap();
+        let params = if command == "edit.plan.result" { json!({"job":job,"session_id":s.edit_plans.session_id()}) } else { json!({"job":job}) };
+        let page = s.execute(command, params).unwrap();
         if page["finished"] == true {
             return page;
         }
@@ -35,7 +36,7 @@ fn version(s: &mut Session, item: u64) -> String {
 fn plan(s: &mut Session) -> Value {
     let clip = s.active_sequence().unwrap().video_tracks[0].items[0].clone();
     let v = version(s, clip.item.0);
-    json!({"request_id":"test-plan","expected_revision":s.revision.to_string(),
+    json!({"session_id":s.edit_plans.session_id(),"request_id":"test-plan","expected_revision":s.revision.to_string(),
         "source_versions":[{"item":clip.item.0,"source_version":v}],
         "steps":[{"id":"timeline.trim","params":{"clip":clip.id.0,"edge":"out","mode":"regular","delta":(-TPS).to_string()},"reason":"shorten the first shot"}]})
 }
@@ -313,7 +314,7 @@ fn plan_graphic_edits_keep_shared_instances_synchronized() {
     let item = s.execute("graphics.upgradeToSourceGraphic", json!({"clip":clip.0})).unwrap()["item"].as_u64().unwrap();
     let track = s.active_sequence().unwrap().find_item(clip).unwrap().0;
     s.execute("timeline.move", json!({"moves":[{"clip":clip.0,"track":track.0,"time":610*TPS}],"copy":true})).unwrap();
-    let p = json!({"request_id":"graphic-plan","expected_revision":s.revision.to_string(),"source_versions":[],"steps":[{"id":"graphics.set","params":{"clip":clip.0,"layer":0,"time":(600*TPS).to_string(),"props":{"text":"shared replacement"}},"reason":"shared title"}]});
+    let p = json!({"session_id":s.edit_plans.session_id(),"request_id":"graphic-plan","expected_revision":s.revision.to_string(),"source_versions":[],"steps":[{"id":"graphics.set","params":{"clip":clip.0,"layer":0,"time":(600*TPS).to_string(),"props":{"text":"shared replacement"}},"reason":"shared title"}]});
     let result = run(&mut s, "edit.plan.apply", p);
     assert_eq!(result["committed"], true, "{result}");
     let layers = &s.project.source_graphics[&filmcraft_project::ItemId(item)].layers;
@@ -380,4 +381,89 @@ fn committed_plan_uses_existing_recovery_snapshot() {
     assert_eq!(*recovered.project, edited);
     recovered.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn lost_reply_does_not_apply_twice() {
+    let mut s = demo();
+    let p = plan(&mut s);
+    let ack = s.execute("edit.plan.apply", p.clone()).unwrap();
+    assert_eq!(s.execute("edit.plan.apply", p.clone()).unwrap()["job"], ack["job"]);
+    let original = wait(&mut s, "edit.plan.result", &ack["job"]);
+    assert_eq!(original["committed"], true);
+    // Expire all ordinary result pages. A commit receipt must survive.
+    for index in 0..40 {
+        let mut other = plan(&mut s);
+        other["request_id"] = json!(format!("read-only-{index}"));
+        assert_eq!(run(&mut s, "edit.plan.validate", other)["status"], "complete");
+    }
+    let before = snapshot(&s);
+    let retry = s.execute("edit.plan.apply", p).unwrap();
+    assert_eq!(retry["job"], ack["job"]);
+    assert_eq!(wait(&mut s, "edit.plan.result", &retry["job"]), original);
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn request_id_conflict_is_rejected() {
+    let mut s = demo();
+    let mut p = plan(&mut s);
+    assert_eq!(run(&mut s, "edit.plan.apply", p.clone())["committed"], true);
+    let before = snapshot(&s);
+    p["steps"][0]["reason"] = json!("same step count, different full parameters");
+    assert!(s.execute("edit.plan.apply", p).unwrap_err().to_string().contains("REQUEST_ID_CONFLICT"));
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn old_session_request_is_explicitly_expired() {
+    let mut s = demo();
+    let p = plan(&mut s);
+    let id = s.execute("edit.plan.session", json!({})).unwrap()["session_id"].clone();
+    let mut restarted = demo();
+    let before = snapshot(&restarted);
+    let mut old = p;
+    old["session_id"] = id.clone();
+    assert!(restarted.execute("edit.plan.apply", old).unwrap_err().to_string().contains("SESSION_EXPIRED"));
+    assert!(restarted.execute("edit.plan.result", json!({"job":1,"session_id":id})).unwrap_err().to_string().contains("SESSION_EXPIRED"));
+    assert_eq!(snapshot(&restarted), before);
+}
+#[test]
+fn dedup_capacity_does_not_forget_commits() {
+    let mut s = demo();
+    let caption = s.execute("captions.add", json!({"text":"original"})).unwrap()["caption"].clone();
+    let session = s.execute("edit.plan.session", json!({})).unwrap()["session_id"].clone();
+    let mut first = Value::Null;
+    let mut original = Value::Null;
+    for index in 0..1024 {
+        let p = json!({"session_id":session,"request_id":format!("committed-{index}"),"expected_revision":s.revision.to_string(),"source_versions":[],"steps":[{"id":"captions.setText","params":{"caption":caption,"text":format!("caption {index}")},"reason":"capacity"}]});
+        let page = run(&mut s, "edit.plan.apply", p.clone());
+        assert_eq!(page["committed"], true, "{index}: {page}");
+        if index == 0 {
+            first = p;
+            original = page;
+        }
+    }
+    let before = snapshot(&s);
+    let mut extra = first.clone();
+    extra["request_id"] = json!("one-too-many");
+    extra["expected_revision"] = json!(s.revision.to_string());
+    let page = run(&mut s, "edit.plan.apply", extra);
+    assert_eq!(page["error"]["code"], "DEDUP_CAPACITY", "{page}");
+    assert_eq!(snapshot(&s), before);
+    let retry = s.execute("edit.plan.apply", first).unwrap();
+    assert_eq!(wait(&mut s, "edit.plan.result", &retry["job"]), original);
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn committed_retry_survives_new_interactive_trim() {
+    let mut s = demo();
+    let p = plan(&mut s);
+    let original = run(&mut s, "edit.plan.apply", p.clone());
+    assert_eq!(original["committed"], true);
+    crate::trim::play_around(&mut s, &json!({"clock":0})).unwrap();
+    assert!(s.trim_play.active());
+    let before = snapshot(&s);
+    let ack = s.execute("edit.plan.apply", p).unwrap();
+    assert_eq!(wait(&mut s, "edit.plan.result", &ack["job"]), original);
+    assert_eq!(snapshot(&s), before);
+    assert!(s.trim_play.active());
 }

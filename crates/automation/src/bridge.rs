@@ -40,6 +40,12 @@ impl BridgeClient {
     /// export's error.
     pub async fn execute(&self, id: &str, mut params: Value) -> Result<Value, AutomationError> {
         crate::media_analysis::ensure_request_id(id, &mut params);
+        let session = if crate::edit_plan::needs_session(id, &params) {
+            Some(self.call("engine.execute", json!({"command":"edit.plan.session","params":{}})).await?["session_id"].clone())
+        } else {
+            None
+        };
+        crate::edit_plan::identity(id, &mut params, session)?;
         if !crate::long_job::is_long(id, &params) {
             return self.call("engine.execute", json!({"command": id, "params": params})).await;
         }

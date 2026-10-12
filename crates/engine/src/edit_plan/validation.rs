@@ -18,6 +18,7 @@ pub(super) struct SourceVersion {
 }
 pub(super) struct Plan {
     pub apply: bool,
+    pub session_id: String,
     #[cfg(test)]
     pub panic_after_step: Option<usize>,
     pub request_id: String,
@@ -115,7 +116,8 @@ fn budget(v: &Value) -> Result<()> {
 }
 pub(super) fn parse(p: &Value) -> Result<Plan> {
     budget(p)?;
-    let f = object(p, &["request_id", "expected_revision", "source_versions", "steps"])?;
+    let f = object(p, &["session_id", "request_id", "expected_revision", "source_versions", "steps"])?;
+    let session_id = string(field(f, "session_id")?, 128, false)?;
     let request_id = string(field(f, "request_id")?, 128, false)?;
     let expected_revision = unsigned(field(f, "expected_revision")?)?;
     let raw = field(f, "steps")?.as_array().filter(|a| !a.is_empty() && a.len() <= 100).ok_or_else(|| invalid("steps must contain 1..100 entries"))?;
@@ -145,6 +147,7 @@ pub(super) fn parse(p: &Value) -> Result<Plan> {
     }
     Ok(Plan {
         apply: false,
+        session_id,
         #[cfg(test)]
         panic_after_step: None,
         request_id,

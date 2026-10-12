@@ -222,9 +222,9 @@ layout unchanged. Pointer gestures dispatch through this same catalog command.
 
 ### Editing plan preflight (P1)
 
-`edit.plan.validate` starts a bounded read-only worker and returns `{job,request_id}`.
-Poll `edit.plan.result {job}` until `finished`; `jobs.list/cancel` include these jobs.
-Input is `{request_id,expected_revision,source_versions,steps}`: revision is an unsigned
+`edit.plan.validate` starts a bounded read-only worker and returns `{job,request_id,session_id}`.
+Poll `edit.plan.result {job,session_id}` until `finished`; `jobs.list/cancel` include these jobs.
+Input is `{session_id,request_id,expected_revision,source_versions,steps}`: revision is an unsigned
 **decimal string**, source_versions is an array of `{item,source_version}` from source
 analysis, and each step is `{id,params,reason}`. Request IDs are bounded to 128 characters.
 Plans allow 1–100 steps, 1 MiB JSON, depth 32, and 512 characters per reason.
@@ -274,3 +274,28 @@ identity/change metadata on Unix and creation/modification/length metadata elsew
 without stamps returns `CAPABILITY_UNAVAILABLE` for file-backed apply; generator-only plans
 need none. These detect ordinary source replacement/changes between verification and commit;
 they are not filesystem locks against hostile concurrent writes after the last check.
+
+
+### Session-scoped transactional retries
+
+First query `edit.plan.session {}` for `session_id` and exact decimal-string `revision`.
+Native start/result calls require that session token. `command_run` for validate/apply fills
+both identifiers only when starting a new request without them; retain the returned identifiers
+for retry. When supplying a request ID, supply its original session ID too. MCP accepts
+`wait:true` on plan starts to poll to completion, releasing the Session/Bridge lock between
+polls and forwarding cancellation. Otherwise the normal result is an asynchronous receipt.
+
+The canonical hash covers all parameters (including reason and source versions) and the
+validate/apply operation. Same ID/same parameters returns the original job even after revision
+changes; different parameters or reusing a validate ID for apply returns `REQUEST_ID_CONFLICT`.
+Committed results survive ordinary result-cache eviction. A separate non-evicting store retains
+at most **1024 committed requests / 8 MiB serialized receipts per Session**. The result and its
+capacity are reserved in the same commit critical section before changing the project. A full
+store returns `DEDUP_CAPACITY` and leaves the document/history unchanged. Failed reservations
+are rolled back; failed/read-only jobs keep the ordinary latest-32 result policy.
+
+An old token after service restart returns `SESSION_EXPIRED` on both start and result polling.
+Re-read the document and decide on a new plan; do not automatically replace the token and replay
+old edits. Project recovery persists the project through existing autosave snapshots, **not**
+transaction receipts: this is session-only deduplication, not crash-durable exactly-once execution.
+Legacy `command_batch` continues to retain successful earlier steps and one undo entry per edit.

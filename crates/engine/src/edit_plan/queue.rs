@@ -28,6 +28,7 @@ struct Job {
 #[derive(Default)]
 struct State {
     worker: bool,
+    committed: super::dedup::Receipts,
     #[cfg(test)]
     panic_after_step: Option<usize>,
     active: Option<u64>,
@@ -36,9 +37,19 @@ struct State {
     receipts: BTreeMap<String, (String, u64)>,
     results: VecDeque<u64>,
 }
-#[derive(Default)]
 pub struct PlanQueue {
     inner: Arc<Mutex<State>>,
+    session_id: String,
+}
+impl Default for PlanQueue {
+    fn default() -> Self {
+        use std::hash::BuildHasher;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let salt = std::collections::hash_map::RandomState::new().hash_one((now, sequence));
+        Self { inner: Arc::new(Mutex::new(State::default())), session_id: format!("plan-{now:x}-{sequence:x}-{salt:016x}") }
+    }
 }
 fn lookup(state: &State, plan: &Plan) -> Result<Option<Value>> {
     let Some((hash, id)) = state.receipts.get(&plan.request_id) else {
@@ -48,12 +59,22 @@ fn lookup(state: &State, plan: &Plan) -> Result<Option<Value>> {
         return Err(failure("REQUEST_ID_CONFLICT", "request ID already has different parameters", false));
     }
     let job = state.jobs.get(id).ok_or_else(|| failure("INTERNAL_ERROR", "missing plan receipt", false))?;
-    if job.finished && job.result.is_none() {
+    if job.finished && job.result.is_none() && state.committed.get(&job.request_id).is_none() {
         return Err(failure("RESULT_EXPIRED", "plan result expired; submit a fresh request ID", false));
     }
     Ok(Some(super::receipt(*id, &job.request_id)))
 }
 impl PlanQueue {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+    pub(super) fn check_session(&self, id: &str) -> Result<()> {
+        if id != self.session_id {
+            Err(failure("SESSION_EXPIRED", "editing session changed; read the document before building a new request", false))
+        } else {
+            Ok(())
+        }
+    }
     pub(super) fn lookup(&self, plan: &Plan) -> Result<Option<Value>> {
         lookup(&self.inner.lock().unwrap_or_else(PoisonError::into_inner), plan)
     }
@@ -124,17 +145,23 @@ impl PlanQueue {
         let state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let job = state.jobs.get(&id).ok_or_else(|| failure("JOB_NOT_FOUND", "editing plan job does not exist", false))?;
         let mut page = if job.finished {
-            job.result.clone().ok_or_else(|| failure("RESULT_EXPIRED", "plan result expired; submit a fresh request", false))?
+            job.result
+                .as_ref()
+                .or_else(|| state.committed.get(&job.request_id))
+                .cloned()
+                .ok_or_else(|| failure("RESULT_EXPIRED", "plan result expired; submit a fresh request", false))?
         } else {
             json!({"schema_version":1,"status":job.status})
         };
+        page["session_id"] = json!(self.session_id);
         page["job"] = json!(id);
         page["request_id"] = json!(job.request_id);
         page["finished"] = json!(job.finished);
         Ok(page)
     }
     pub fn list(&self) -> Vec<Value> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner).jobs.iter().map(|(id,j)|json!({"id":id,"kind":"edit_plan","label":"Editing plan","request_id":j.request_id,"status":j.status,"finished":j.finished,"progress":if j.finished{1.0}else{0.0},"result_expired":j.finished && j.result.is_none()})).collect()
+        let state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        state.jobs.iter().map(|(id,j)|json!({"id":id,"kind":"edit_plan","label":"Editing plan","session_id":self.session_id,"request_id":j.request_id,"status":j.status,"finished":j.finished,"progress":if j.finished{1.0}else{0.0},"result_expired":j.finished && j.result.is_none() && state.committed.get(&j.request_id).is_none()})).collect()
     }
     pub fn cancel(&self, id: u64) -> bool {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
@@ -281,12 +308,27 @@ pub(super) fn poll(s: &mut crate::Session) {
     for id in ids {
         let Some(job) = state.jobs.get_mut(&id) else { continue };
         let Some(ready) = job.ready.take() else { continue };
-        let result = if job.cancel.load(Ordering::Relaxed) {
+        let request_id = job.request_id.clone();
+        let cancelled = job.cancel.load(Ordering::Relaxed);
+        let hash = state.receipts.get(&request_id).map(|(hash, _)| hash.clone());
+        let mut reserved = false;
+        let result = if cancelled {
             Err(failure("CANCELLED", "candidate discarded before commit", false))
+        } else if let Some(hash) = hash {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::transaction::commit(s, ready, |report| {
+                    state.committed.record(&request_id, &hash, report)?;
+                    reserved = true;
+                    Ok(())
+                })
+            }))
+            .unwrap_or_else(|_| Err(failure("COMMIT_FAILED", "unexpected error preparing commit", false)))
         } else {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::transaction::commit(s, ready)))
-                .unwrap_or_else(|_| Err(failure("COMMIT_FAILED", "unexpected error preparing commit", false)))
+            Err(failure("INTERNAL_ERROR", "request receipt is missing", false))
         };
+        if result.is_err() && reserved {
+            state.committed.rollback(&request_id);
+        }
         finish(&mut state, id, result);
     }
     drop(state);

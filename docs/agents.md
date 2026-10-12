@@ -492,3 +492,19 @@ There are no embeddings, external model calls or automatic summary guesses. As w
 analysis jobs, retrying the same request ID returns the original result snapshot; use a fresh
 request to observe later source/index changes. These commands change neither the project nor
 its undo history.
+
+### Atomic editing plans and retrying a lost reply
+
+Use `command_run` with `edit.plan.validate` / `edit.plan.apply` for an opt-in atomic plan of
+explicit trim, move, clear, caption-text or graphic-property edits. Query `edit.plan.session`
+for an exact decimal-string revision, inspect content versions for affected media, then send
+`{expected_revision,source_versions:[{item,source_version}],steps:[{id,params,reason}],wait:true}`.
+MCP supplies new session/request IDs if both are omitted. Keep them and all original parameters
+when retrying an uncertain response. Validate and apply need different request IDs.
+
+Native starts return `{job,request_id,session_id}`; poll `edit.plan.result {job,session_id}`.
+Success reports `committed:true`, before/after revisions and one undo label. `SESSION_EXPIRED`
+means read the recovered/current document before making a new decision. Export/import/save,
+network/model actions, UI operations, and nested plans/batches are not allowed inside plans.
+See [the protocol](control-protocol.md#editing-plan-preflight-p1) for the fixed allowlist,
+source guard limits and non-evicting session receipt budget.
