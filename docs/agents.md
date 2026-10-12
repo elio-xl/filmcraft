@@ -85,6 +85,7 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 | `media_import` | both | import files by absolute path (`paths`, an array; optional `bin`, `image_sequence`) |
 | `media_inspect` | both | source metadata, full-content version, decoder analysis capabilities; `item`, optional `expected_version`, `request_id`, `wait` |
 | `media_frames` | both | source PNG image blocks with exact source timestamps; no timeline placement required |
+| `media_preview_clip` | both | short source preview; PNG fallback by default, controlled MP4 resource for verified video clients |
 | `media_analysis_result` | both | poll `{job}` and retrieve completed image blocks |
 | `render_frame` | both | PNG of the program frame at `seconds` (headless renders; bridge screenshots the Program monitor). Read-only: the playhead and selection are left as they were |
 | `ui_inspect` | bridge | UI state: tool, workspace, panels, zoom, playback, fps |
@@ -128,7 +129,7 @@ Use `media_import`, then `media_inspect {item}` and `media_frames {item}`. The a
 leave the project, playhead, selection, history and active trims unchanged. `readOnlyHint` refers
 to project and source files: analysis still creates background jobs and an in-memory cache.
 The decoder's `analysis_capabilities.frames` indicates verified presentation-time support;
-an individual corrupt frame can still fail. Short video output is not implemented in P0. MP4/MOV analysis supports unscaled quarter-turn display matrices; mirrors, scales, shear, perspective and complex edit lists are explicitly unsupported. Leading empty edits must sum to an exact number of video-track clock units; fractional offsets are also unsupported. Image sequences hold the nearest earlier listed image for a missing slot (or the first later one); a selected file that fails decoding is an error, never silently replaced.
+an individual corrupt frame can still fail. Short video previews are available through `media_preview_clip`; clients default to PNG fallback until video consumption is qualified. MP4/MOV analysis supports unscaled quarter-turn display matrices; mirrors, scales, shear, perspective and complex edit lists are explicitly unsupported. Leading empty edits must sum to an exact number of video-track clock units; fractional offsets are also unsupported. Image sequences hold the nearest earlier listed image for a missing slot (or the first later one); a selected file that fails decoding is an error, never silently replaced.
 
 ```json
 {"item":12,"strategy":"uniform","start_ticks":"0","end_ticks":"2540160000000","max_frames":8,"max_side":512,"wait":true}
@@ -385,3 +386,33 @@ ROADMAP.md and [target-app-parity.md](target-app-parity.md) keep two numbers: **
   what works;
 - benchmarks state the machine, the load average and before/after on the same build;
 - don't raise a percentage without evidence a reviewer can rerun.
+
+## Short source previews (P1)
+
+`media_preview_clip {item}` samples PNG frames from the first ten seconds (or the available
+subclip range). To choose a range, supply both `start_ticks` and `end_ticks` as decimal strings.
+The range must be within the source and at most 30 seconds. `max_side` defaults to 960, at most
+1920; `max_fps` defaults to and cannot exceed 12. A source below that frame rate is not upsampled.
+`audio` defaults to true and includes the source's primary audio stream when available.
+
+`video_capability` defaults to `unknown`; `unknown` and `unsupported` return actual PNG image
+blocks plus a `fallback_call` for the same interval. These paths work in image-capable clients.
+Only set `video_capability:"verified"` after verifying the intended client/model can consume video.
+This flag is a caller assertion, not server certification of a model. A resource that can be
+saved or played by a decoder is not proof that a model consumed it.
+
+For verified clients the result includes a `resource_link`, source offset/range, video and movie
+timebases, frame rate, dimensions, audio status, MIME type, byte size and artifact ID. Fetch the
+`filmcraft://analysis/preview:<digest>` URI with MCP `resources/read`. The engine equivalent is
+`media.analysis.preview.read {artifact}`; it accepts an opaque ID only, never a filesystem path.
+Artifacts are H.264 MP4, at most 24 MiB, and encoding stops before a write can exceed that limit.
+Previews are built in an isolated temporary project and bounded memory; no preview files or
+proxy attachments are created. Container presentation length rounds up by at most one nanosecond;
+source Tick ranges remain exact. Playback retains the source speed and audio priming offset.
+
+The separate video LRU holds at most 16 artifacts / 512 MiB. Active readers keep an eviction
+lease. `media.analysis.clearCache` also clears unused video artifacts. Expired artifact IDs or
+request receipts return `RESULT_EXPIRED`; use a new request ID to regenerate. Cancellation,
+source-version changes, and decode failures discard output. Corrupt source frames are never
+certified as successful black-frame previews. Bridge resource reads alone allow a 36 MiB JSON
+reply for base64 expansion; other Bridge calls retain their 16 MiB limit.

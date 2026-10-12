@@ -86,8 +86,9 @@ impl BridgeClient {
             let line = format!("{}\n", json!({"id": id, "method": method, "params": params}));
             let res: Result<Value, AutomationError> = async {
                 conn.1.write_all(line.as_bytes()).await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
-                let buf =
-                    tokio::time::timeout(Duration::from_secs(90), read_reply(&mut conn.0)).await.map_err(|_| AutomationError::Bridge("timeout".into()))??;
+                let buf = tokio::time::timeout(Duration::from_secs(90), read_reply(&mut conn.0, reply_limit(method, &params)))
+                    .await
+                    .map_err(|_| AutomationError::Bridge("timeout".into()))??;
                 serde_json::from_slice(&buf).map_err(|e| AutomationError::Bridge(format!("bad reply: {e}")))
             }
             .await;
@@ -115,7 +116,15 @@ impl BridgeClient {
 
 /// Control replies are larger than request lines (PNG/base64), but never unbounded.
 const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
-async fn read_reply<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, AutomationError> {
+fn reply_limit(method: &str, params: &Value) -> usize {
+    if method == "engine.execute" && params["command"] == "media.analysis.preview.read" {
+        // 24 MiB binary payload, base64 expansion and a bounded JSON envelope.
+        36 * 1024 * 1024
+    } else {
+        MAX_REPLY_BYTES
+    }
+}
+async fn read_reply<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R, limit: usize) -> Result<Vec<u8>, AutomationError> {
     let mut output = Vec::new();
     loop {
         let chunk = reader.fill_buf().await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
@@ -124,7 +133,7 @@ async fn read_reply<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Resul
         }
         let newline = chunk.iter().position(|b| *b == b'\n');
         let count = newline.map_or(chunk.len(), |n| n + 1);
-        if count > MAX_REPLY_BYTES.saturating_sub(output.len()) {
+        if count > limit.saturating_sub(output.len()) {
             return Err(AutomationError::ResponseLimit);
         }
         output.try_reserve(count).map_err(|_| AutomationError::ResponseLimit)?;
@@ -207,5 +216,24 @@ mod tests {
         let seen = seen.lock().await;
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[1]["params"]["command"], "sequence.inspect");
+    }
+}
+
+#[cfg(test)]
+mod preview_budget_tests {
+    use super::*;
+    #[tokio::test]
+    async fn preview_reads_have_a_separate_bounded_transport_budget() {
+        let params = json!({"command":"media.analysis.preview.read","params":{"artifact":"preview:test"}});
+        let resource_limit = reply_limit("engine.execute", &params);
+        assert_eq!(resource_limit, 36 * 1024 * 1024);
+        assert_eq!(reply_limit("different-method", &params), MAX_REPLY_BYTES);
+        assert_eq!(reply_limit("engine.execute", &json!({"command":"media.analysis.result"})), MAX_REPLY_BYTES);
+        let mut payload = vec![b' '; MAX_REPLY_BYTES + 1];
+        payload.push(b'\n');
+        assert!(matches!(read_reply(&mut &payload[..], MAX_REPLY_BYTES).await, Err(AutomationError::ResponseLimit)));
+        assert_eq!(read_reply(&mut &payload[..], resource_limit).await.unwrap().len(), payload.len());
+        let oversized = vec![b' '; resource_limit + 1];
+        assert!(matches!(read_reply(&mut &oversized[..], resource_limit).await, Err(AutomationError::ResponseLimit)));
     }
 }

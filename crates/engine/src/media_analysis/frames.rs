@@ -22,7 +22,7 @@ fn invalid(message: &str) -> EngineError {
     failure("INVALID_FRAME", message, false)
 }
 
-fn validate(frame: &VideoFrame) -> Result<()> {
+pub(super) fn validate(frame: &VideoFrame) -> Result<()> {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let pixels = w.checked_mul(h).filter(|&n| n > 0 && n <= MAX_PIXELS).ok_or_else(|| invalid("decoded dimensions exceed the image budget"))?;

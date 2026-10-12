@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod frames;
 pub mod jobs;
+pub mod preview;
 pub mod request;
 pub mod source;
 
@@ -55,6 +56,26 @@ pub fn commands() -> Vec<crate::CommandSpec> {
     use crate::commands::{CommandSpec, always};
     vec![
         CommandSpec {
+            id: "media.analysis.preview",
+            label: "Preview Source Clip",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"request_id":str?,"expected_version":str?,"start_ticks":str?,"end_ticks":str?,"max_side":1..1920?,"max_fps":1..12?,"audio":bool?,"video_capability":"unknown|unsupported|verified"?}"#,
+            enabled: always,
+            run: preview::start,
+            journal: false,
+        },
+        CommandSpec {
+            id: "media.analysis.preview.read",
+            label: "Read Preview Artifact",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"artifact":str}"#,
+            enabled: always,
+            run: preview::read,
+            journal: false,
+        },
+        CommandSpec {
             id: "media.analysis.clearCache",
             label: "Clear Unused Analysis Cache",
             menu: &[],
@@ -96,3 +117,6 @@ pub fn commands() -> Vec<crate::CommandSpec> {
         },
     ]
 }
+
+#[cfg(test)]
+mod preview_tests;

@@ -382,3 +382,53 @@ fn source_frames_map_fractional_vfr_reuse_speed_and_reverse() {
     clip.speed = 0.5;
     assert_eq!(clip.source_time_at(clip.start + rate.tick_of(6)), rate.tick_of(13));
 }
+
+#[test]
+fn source_preview_video_and_png_fallback_round_trip() {
+    let dir = root("preview");
+    let manifest = generate_fixtures(&dir);
+    let fixtures: Value = serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+    let bridge = std::env::var("FILMCRAFT_AGENT_TEST_BRIDGE").ok();
+    let mut client = match &bridge {
+        Some(address) => Mcp::start(&["--bridge", address]),
+        None => Mcp::start(&[]),
+    };
+    client.run("file.newProject", json!({"name":"Source preview acceptance"}));
+    let imported = metadata(&client.good("media_import", json!({"paths":[fixtures["videos"][0]["path"]]})));
+    let item = imported["items"][0].as_u64().unwrap();
+    let before = (client.good("doc_inspect", json!({})), client.run("history.list", json!({})));
+    let started = Instant::now();
+    let fallback = client.good("media_preview_clip", json!({"item":item,"start_ticks":(2*TPS).to_string(),"end_ticks":(6*TPS).to_string(),"max_side":160}));
+    let meta = metadata(&fallback);
+    assert_eq!(meta["delivery"], "frames");
+    let frames = meta["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 8);
+    for frame in frames {
+        let picture = image(&fallback, frame["content_index"].as_u64().unwrap() as usize);
+        assert_eq!(picture.dimensions(), (160, 90));
+        let time = frame["actual_ticks"].as_str().unwrap().parse::<i64>().unwrap();
+        assert!((2 * TPS..6 * TPS).contains(&time));
+    }
+    let png_ms = started.elapsed().as_millis();
+    let started = Instant::now();
+    let movie = client.good("media_preview_clip", json!({"item":item,"expected_version":meta["source_version"],"start_ticks":(2*TPS).to_string(),"end_ticks":(6*TPS).to_string(),"max_side":160,"audio":false,"video_capability":"verified"}));
+    let video = metadata(&movie);
+    let uri = video["preview"]["resource_uri"].clone();
+    let resource = client.rpc("resources/read", json!({"uri":uri}));
+    let data = base64::engine::general_purpose::STANDARD.decode(resource["result"]["contents"][0]["blob"].as_str().unwrap()).unwrap();
+    assert!(data.len() <= 24 * 1024 * 1024);
+    let source = filmcraft_codecs::Mp4Source::open("preview.mp4", data.clone().into()).unwrap();
+    assert_eq!(source.info().frame_rate(), FrameRate::new(12, 1));
+    assert_eq!(source.info().duration, Tick(4 * TPS));
+    for (time, green) in [(TPS / 2, false), (5 * TPS / 2, true)] {
+        let frame = source.video_frame(FrameRequest::full(Tick(time))).unwrap();
+        let rgba = frame.to_rgba8();
+        assert_eq!(rgba[1] > rgba[0], green, "video source offset or speed changed");
+    }
+    assert_eq!((client.good("doc_inspect", json!({})), client.run("history.list", json!({}))), before);
+    std::fs::write(dir.join("preview.mp4"), &data).unwrap();
+    std::fs::write(dir.join("preview.mp4.attribution"), "asset: preview.mp4\ntitle: Source preview acceptance\nauthor: FilmCraft contributors\nsource: original work\nlicense: MIT OR Apache-2.0\nadded: 2026-10-12 by FilmCraft contributors\nnotes: Generated from procedural FilmCraft test footage.\n").unwrap();
+    std::fs::write(dir.join("preview-measurements.json"), serde_json::to_vec_pretty(&json!({"png_wall_ms":png_ms,"video_wall_ms":started.elapsed().as_millis(),"video_bytes":data.len(),"fallback_frames":frames.len(),"client":"Rust stdio acceptance client","model_video_consumption":"not tested"})).unwrap()).unwrap();
+    std::fs::write(dir.join("mcp-transcript.json"), serde_json::to_vec(&client.transcript).unwrap()).unwrap();
+    println!("P1 preview artifacts: {}", dir.display());
+}

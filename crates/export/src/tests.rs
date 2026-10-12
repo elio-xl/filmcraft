@@ -5,6 +5,33 @@ use filmcraft_project::{ItemKind, Label, MediaClip, MediaRef, SequenceSettings, 
 use filmcraft_render::SourceMap;
 use filmcraft_time::TICKS_PER_SECOND;
 
+#[test]
+fn bounded_output_stops_before_allocating_or_publishing_oversized_file() {
+    use std::io::{Seek, SeekFrom};
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = published.clone();
+    let settings = ExportSettings {
+        output_limit: Some(16),
+        sink: Some(OutputSink(Arc::new(move |_, _| {
+            seen.store(true, Ordering::Relaxed);
+            Ok(())
+        }))),
+        ..Default::default()
+    };
+    let mut output = Out::create(&settings).unwrap();
+    output.write_all(&[0; 16]).unwrap();
+    assert!(output.write_all(&[1]).is_err(), "budget must be enforced during encoding");
+    assert_eq!(output.stream_position().unwrap(), 16);
+    assert!(output.seek(SeekFrom::Start(17)).is_err());
+    assert_eq!(output.stream_position().unwrap(), 16);
+    assert!(!published.load(Ordering::Relaxed));
+    // Header rewrites inside the existing allocation remain possible.
+    output.seek(SeekFrom::Start(0)).unwrap();
+    output.write_all(&[2; 4]).unwrap();
+    assert_eq!(output.finish(&settings).unwrap(), 16);
+    assert!(published.load(Ordering::Relaxed));
+}
+
 pub(crate) fn project() -> (Arc<Project>, ItemId, SourceMap) {
     let mut p = Project::new("x");
     let g = GeneratorSource::new(Generator::ColorMatte { color: [1.0, 0.0, 0.0, 1.0] }, 320, 180, FrameRate::FPS_24, Tick(2 * TICKS_PER_SECOND));
@@ -466,4 +493,35 @@ impl FrameRenderer for FakeRenderer {
     ) -> Option<filmcraft_render::Image> {
         Some(filmcraft_render::Image::new(320, 180))
     }
+}
+
+#[test]
+fn bounded_video_encoder_never_publishes_partial_output() {
+    let (project, sequence, sources) = project();
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = published.clone();
+    let settings = ExportSettings {
+        frame_size: Some((32, 18)),
+        output_limit: Some(128),
+        sink: Some(OutputSink(Arc::new(move |_, _| {
+            seen.store(true, Ordering::Relaxed);
+            Ok(())
+        }))),
+        ..Default::default()
+    };
+    let error = export(&project, sequence, &settings, &sources, &Progress::default()).unwrap_err();
+    assert!(error.to_string().contains("output byte budget"), "{error}");
+    assert!(!published.load(Ordering::Relaxed), "a failed video must never reach the artifact cache sink");
+}
+#[test]
+fn twenty_four_mib_output_boundary_is_checked_during_writes() {
+    let limit = 24 * 1024 * 1024;
+    let settings = ExportSettings { output_limit: Some(limit), sink: Some(OutputSink(Arc::new(|_, _| Ok(())))), ..Default::default() };
+    let mut output = Out::create(&settings).unwrap();
+    let chunk = vec![123; 1024 * 1024];
+    for _ in 0..24 {
+        output.write_all(&chunk).unwrap();
+    }
+    assert!(output.write_all(&[1]).is_err());
+    assert_eq!(std::io::Seek::stream_position(&mut output).unwrap(), limit);
 }

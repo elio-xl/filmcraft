@@ -394,6 +394,13 @@ pub struct ExportSettings {
     /// writing `path` (hosts without a filesystem: the web app offers the file as a download).
     #[serde(skip)]
     pub sink: Option<OutputSink>,
+    /// Host-only byte budget for a streamed output file; never accepted from presets.
+    #[serde(skip)]
+    pub output_limit: Option<u64>,
+    /// Host-only MP4/MOV presentation trim, retaining the last encoded frame without
+    /// extending playback to its full duration. The movie clock has nanosecond resolution.
+    #[serde(skip)]
+    pub presentation_duration: Option<Tick>,
 }
 
 /// Receives in-memory export output: `(path, bytes)` per finished file.
@@ -410,6 +417,8 @@ impl std::fmt::Debug for OutputSink {
 enum Out {
     File(std::io::BufWriter<std::fs::File>),
     Mem(std::io::Cursor<Vec<u8>>),
+    // Constructed only by create_path, exactly one wrapper deep.
+    Bounded { inner: Box<Out>, limit: u64 },
 }
 
 impl Out {
@@ -419,11 +428,16 @@ impl Out {
 
     /// An output file at `path` (OP-Atom exports write several).
     fn create_path(settings: &ExportSettings, path: &str) -> Result<Out> {
-        if settings.sink.is_some() {
-            return Ok(Out::Mem(std::io::Cursor::new(Vec::new())));
-        }
-        let f = std::fs::File::create(path).map_err(|e| ExportError::Io(format!("{path}: {e}")))?;
-        Ok(Out::File(std::io::BufWriter::new(f)))
+        let inner = if settings.sink.is_some() {
+            Out::Mem(std::io::Cursor::new(Vec::new()))
+        } else {
+            let f = std::fs::File::create(path).map_err(|e| ExportError::Io(format!("{path}: {e}")))?;
+            Out::File(std::io::BufWriter::new(f))
+        };
+        Ok(match settings.output_limit {
+            Some(limit) => Out::Bounded { inner: Box::new(inner), limit },
+            None => inner,
+        })
     }
 
     /// Flush (and hand in-memory output to the sink); returns the file size.
@@ -438,6 +452,7 @@ impl Out {
                 Ok(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
             }
             Out::Mem(c) => write_output(settings, path, c.into_inner()),
+            Out::Bounded { inner, .. } => inner.finish_path(settings, path),
         }
     }
 }
@@ -445,6 +460,9 @@ impl Out {
 /// Write one finished output file (to the sink when there is one); returns its size.
 fn write_output(settings: &ExportSettings, path: &str, data: Vec<u8>) -> Result<u64> {
     let n = data.len() as u64;
+    if settings.output_limit.is_some_and(|limit| n > limit) {
+        return Err(ExportError::Io("output byte budget exceeded".into()));
+    }
     match &settings.sink {
         Some(sink) => (sink.0)(path, data),
         None => std::fs::write(path, &data),
@@ -458,12 +476,20 @@ impl Write for Out {
         match self {
             Out::File(w) => w.write(buf),
             Out::Mem(w) => w.write(buf),
+            Out::Bounded { inner, limit } => {
+                use std::io::Seek;
+                if inner.stream_position()?.checked_add(buf.len() as u64).is_none_or(|end| end > *limit) {
+                    return Err(std::io::Error::other("output byte budget exceeded"));
+                }
+                inner.write(buf)
+            }
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Out::File(w) => w.flush(),
             Out::Mem(w) => w.flush(),
+            Out::Bounded { inner, .. } => inner.flush(),
         }
     }
 }
@@ -473,6 +499,23 @@ impl std::io::Seek for Out {
         match self {
             Out::File(w) => w.seek(pos),
             Out::Mem(w) => w.seek(pos),
+            Out::Bounded { inner, limit } => {
+                use std::io::SeekFrom;
+                let before = inner.stream_position()?;
+                let base = match pos {
+                    SeekFrom::Start(n) => i128::from(n),
+                    SeekFrom::Current(n) => i128::from(before) + i128::from(n),
+                    SeekFrom::End(n) => {
+                        let end = inner.seek(SeekFrom::End(0))?;
+                        inner.seek(SeekFrom::Start(before))?;
+                        i128::from(end) + i128::from(n)
+                    }
+                };
+                if base < 0 || base > i128::from(*limit) {
+                    return Err(std::io::Error::other("output byte budget exceeded by seek"));
+                }
+                inner.seek(SeekFrom::Start(base as u64))
+            }
         }
     }
 }
@@ -570,6 +613,8 @@ impl Default for ExportSettings {
             h264_pass: H264Pass::Single,
             signal: ColorSignal::default(),
             sink: None,
+            output_limit: None,
+            presentation_duration: None,
         }
     }
 }

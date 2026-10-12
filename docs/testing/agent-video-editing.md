@@ -162,3 +162,41 @@ Both regression tests were observed failing before their fixes and passing after
 complete gate passed: 2,874 tests passed, 0 failed, 41 existing ignored; formatting, workspace
 Clippy, dependency layers, 69 attributed assets and the 44-crate Wasm check also passed. No second
 reviewer pass was used; focused RED→GREEN tests and the full gate verify the review fixes.
+
+## P1 AP01 source preview qualification (2026-10-12)
+
+`source_preview_video_and_png_fallback_round_trip` runs the actual CLI stdio MCP server against
+original generated source media. It requests source seconds 2–6, checks eight real PNG fallback
+blocks, opts the decoder test client into video, reads the controlled MP4 resource, and decodes
+the result with FilmCraft. Assertions cover 160×90 output, 12 fps, exactly four seconds, unchanged
+source speed/offset, red-to-green picture timing, and identical document/history snapshots.
+
+```sh
+cargo test --release -p filmcraft-cli --test agent_editing source_preview_video_and_png_fallback_round_trip -- --nocapture
+```
+
+The same test accepts `FILMCRAFT_AGENT_TEST_BRIDGE` for a dedicated desktop instance, with the same
+precautions as the P0 scenario above. Generated MP4, attribution, transcript and measurements
+remain under `target/fixtures/agent-editing/preview-<pid>/`.
+
+The first headless run (`preview-17968`) passed in 4.22 seconds including fixture generation:
+8-frame PNG fallback 205 ms; MP4 request/read 213 ms; MP4 22,812 bytes. These are single warm-host
+observations at 160 pixels, not guarantees for 960-pixel output or cold media.
+
+Additional engine tests cover 24000/1001 fps input with synchronized sound/picture markers,
+5 fps input without upsampling, disabled audio, non-frame-aligned presentation duration,
+anamorphic pixel aspect, corrupt-frame rejection, cancellation, cache expiry, active-reader
+leases, strict parameters, and the 30-second input boundary. Export tests exercise the real
+encoder stopping on its output budget without publishing partial data, plus exact 24 MiB writes.
+Automation tests cover resource links and reads, path-like URI rejection, expired resources,
+strict schemas and distinct bounded Bridge response limits.
+
+The current Codex model also received the real `media_preview_clip` PNG fallback through a
+stdio relay at 512×288. The unchanged MCP image blocks showed source 2s: red circle, label `1 050`;
+source 4s: green triangle, label `1 100`; requested 5.5s / actual 5.48s: green triangle, label
+`1 137`. Exact requests/responses are in `preview-17968/model-image-relay.json`.
+
+This qualifies image fallback and MP4 encoding/resource/decoder transport. Native FilmCraft MCP
+tools are still absent from this Codex session, and direct model video/audio consumption is **not
+qualified**. Keep `video_capability` unknown unless that separate client/model verification has
+been performed. A returned or locally decoded MP4 does not establish model video consumption.

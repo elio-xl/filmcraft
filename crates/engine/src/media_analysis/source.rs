@@ -280,6 +280,7 @@ pub fn inspect(source: &AnalysisSource) -> Result<Value> {
         return Err(failure("RESOURCE_LIMIT", "too many audio streams", false));
     }
     let frame_support = source.source.analysis_support();
+    let preview_support = frame_support.is_ok() && info.video.is_some();
     let video = info.video.as_ref().map(|v| {
         let rate = (info.kind != MediaKind::Still && v.frame_rate.num > 0 && v.frame_rate.den > 0).then_some(v.frame_rate);
         json!({"width":v.width,"height":v.height,"frame_rate":rate,"pixel_aspect":{"num":v.par.0,"den":v.par.1},
@@ -294,7 +295,8 @@ pub fn inspect(source: &AnalysisSource) -> Result<Value> {
         "analysis_capabilities":{
             "inspect":{"supported":true},
             "frames":{"supported":frame_support.is_ok(),"reason":frame_support.err().map(|error|error.to_string())},
-            "preview_video":{"supported":false,"reason":"short-video analysis is not implemented in P0"}
+            "preview_video":{"supported":preview_support,"default_delivery":"frames","model_consumption":"requires_client_verification",
+                "max_duration_ticks":(30 * filmcraft_time::TICKS_PER_SECOND).to_string(),"max_bytes":super::preview::MAX_VIDEO_BYTES}
         },
         "rotation_degrees":null,"encoded_size":null,"display_size":null,
         "unavailable_reasons":{

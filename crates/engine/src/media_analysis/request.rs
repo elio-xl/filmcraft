@@ -51,7 +51,7 @@ fn bad(cmd: &str, message: &str) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: message.into() }
 }
 
-fn object<'a>(params: &'a Value, cmd: &str, extra: &[&str]) -> Result<&'a Map<String, Value>> {
+pub(super) fn object<'a>(params: &'a Value, cmd: &str, extra: &[&str]) -> Result<&'a Map<String, Value>> {
     let fields = params.as_object().ok_or_else(|| bad(cmd, "expected an object"))?;
     if fields.keys().any(|key| !COMMON_FIELDS.contains(&key.as_str()) && !extra.contains(&key.as_str())) {
         return Err(bad(cmd, "unknown parameter"));
@@ -68,7 +68,7 @@ fn identifier(fields: &Map<String, Value>, key: &str, max_chars: usize, cmd: &st
     Ok(Some(text.to_owned()))
 }
 
-fn common(fields: &Map<String, Value>, cmd: &str) -> Result<InspectRequest> {
+pub(super) fn common(fields: &Map<String, Value>, cmd: &str) -> Result<InspectRequest> {
     let item = fields.get("item").and_then(Value::as_u64).filter(|id| *id != 0).ok_or_else(|| bad(cmd, "item must be a positive integer"))?;
     Ok(InspectRequest {
         item: ItemId(item),
@@ -82,7 +82,7 @@ pub fn parse_inspect(params: &Value) -> Result<InspectRequest> {
     common(object(params, INSPECT_COMMAND, &[])?, INSPECT_COMMAND)
 }
 
-fn tick(value: &Value) -> Result<Tick> {
+pub(super) fn tick(value: &Value) -> Result<Tick> {
     let text = value.as_str().ok_or_else(|| bad(FRAMES_COMMAND, "ticks must be nonnegative decimal strings"))?;
     if text.is_empty() || text.len() > 19 || !text.bytes().all(|b| b.is_ascii_digit()) {
         return Err(bad(FRAMES_COMMAND, "ticks must be nonnegative decimal strings within i64"));
@@ -90,7 +90,7 @@ fn tick(value: &Value) -> Result<Tick> {
     text.parse::<i64>().map(Tick).map_err(|_| bad(FRAMES_COMMAND, "ticks exceed i64"))
 }
 
-fn bounded_integer(fields: &Map<String, Value>, key: &str, default: u64, max: u64) -> Result<u64> {
+pub(super) fn bounded_integer(fields: &Map<String, Value>, key: &str, default: u64, max: u64) -> Result<u64> {
     match fields.get(key) {
         None => Ok(default),
         Some(value) => value

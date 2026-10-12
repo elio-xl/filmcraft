@@ -13,7 +13,7 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const ENVELOPE_RESERVE: usize = 4096;
 
 pub(crate) fn ensure_request_id(command: &str, params: &mut Value) {
-    if !matches!(command, "media.analysis.inspect" | "media.analysis.frames") {
+    if !matches!(command, "media.analysis.inspect" | "media.analysis.frames" | "media.analysis.preview") {
         return;
     }
     if let Some(fields) = params.as_object_mut() {
@@ -74,6 +74,18 @@ pub fn to_tool_result(mut page: Value) -> Result<CallToolResult, AutomationError
         let text = serde_json::to_string(&page).map_err(|e| AutomationError::Other(e.to_string()))?;
         let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
         result.content.extend(images.iter().cloned());
+        if let Some(preview) = page.get("preview") {
+            let id = preview["artifact_id"]
+                .as_str()
+                .filter(|id| filmcraft_engine::media_analysis::preview::valid_id(id))
+                .ok_or_else(|| malformed("invalid preview artifact"))?;
+            let uri = format!("filmcraft://analysis/{id}");
+            if preview["resource_uri"] != uri {
+                return Err(malformed("invalid preview resource URI"));
+            }
+            let size = preview["bytes"].as_u64().filter(|size| *size <= 24 * 1024 * 1024).ok_or_else(|| malformed("preview exceeds resource budget"))?;
+            result.content.push(ContentBlock::resource_link(rmcp::model::Resource::new(uri, "source-preview").with_mime_type("video/mp4").with_size(size)));
+        }
         result.structured_content = Some(page.clone());
         result.is_error = Some(matches!(page["status"].as_str(), Some("error" | "cancelled")));
         let mut counter = Counter(0);

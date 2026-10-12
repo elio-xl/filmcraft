@@ -415,21 +415,40 @@ impl Exporter {
         let file = Out::create(&self.settings)?;
         let mut opts = WriterOptions::new(self.brand);
         opts.metadata = self.settings.metadata.udta();
+        let presentation = match self.settings.presentation_duration {
+            None => None,
+            Some(duration) if duration.0 > 0 => {
+                opts.movie_timescale = 1_000_000_000;
+                let ticks = i128::from(duration.0) * i128::from(opts.movie_timescale);
+                let unit = i128::from(filmcraft_time::TICKS_PER_SECOND);
+                Some(u64::try_from((ticks + unit - 1) / unit).map_err(|_| ExportError::Unsupported("presentation duration exceeds container clock".into()))?)
+            }
+            Some(_) => return Err(ExportError::Unsupported("presentation duration must be positive".into())),
+        };
+        let trim = |config: &mut TrackConfig| {
+            if let Some(segment_duration) = presentation {
+                config.edits = vec![filmcraft_isobmff::Edit { segment_duration, media_time: config.media_start.unwrap_or(0), media_rate: 0x10000 }];
+            }
+        };
         let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
         let mut vcfg = TrackConfig::new(self.venc.sample_entry(), self.venc.timescale());
         vcfg.media_start = self.venc.media_start();
+        trim(&mut vcfg);
         self.vt = mux.add_track(vcfg).map_err(|e| ExportError::Io(e.to_string()))?;
         self.at = match (&self.audio, &self.aenc) {
             (None, _) => None,
             (Some(a), Some(enc)) => {
                 let mut c = TrackConfig::new(enc.sample_entry(), a.sr);
                 c.media_start = Some(enc.priming() as i64);
+                trim(&mut c);
                 Some(mux.add_track(c).map_err(|e| ExportError::Io(e.to_string()))?)
             }
             (Some(a), None) => {
                 let bits = if self.settings.audio.bits >= 24 { 24 } else { 16 };
                 let pcm = PcmConfig { bits, float: false, big_endian: false, signed: true, channels: a.channels as _, sample_rate: a.sr as f64 };
-                Some(mux.add_track(TrackConfig::new(SampleEntry::pcm(pcm), a.sr)).map_err(|e| ExportError::Io(e.to_string()))?)
+                let mut c = TrackConfig::new(SampleEntry::pcm(pcm), a.sr);
+                trim(&mut c);
+                Some(mux.add_track(c).map_err(|e| ExportError::Io(e.to_string()))?)
             }
         };
         self.mux = Some(mux);

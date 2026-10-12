@@ -20,24 +20,28 @@ const MAX_JOBS: usize = 10_000;
 pub enum Request {
     Inspect(InspectRequest),
     Frames(AnalysisRequest),
+    Preview(super::preview::Request),
 }
 impl Request {
     fn request_id(&self) -> Option<&str> {
         match self {
             Self::Inspect(r) => r.request_id.as_deref(),
             Self::Frames(r) => r.request_id.as_deref(),
+            Self::Preview(r) => r.request_id.as_deref(),
         }
     }
     fn expected_version(&self) -> Option<&str> {
         match self {
             Self::Inspect(r) => r.expected_version.as_deref(),
             Self::Frames(r) => r.expected_version.as_deref(),
+            Self::Preview(r) => r.expected_version.as_deref(),
         }
     }
     pub fn item(&self) -> filmcraft_project::ItemId {
         match self {
             Self::Inspect(r) => r.item,
             Self::Frames(r) => r.item,
+            Self::Preview(r) => r.item,
         }
     }
     fn canonical(&self, include_version: bool) -> Result<Value> {
@@ -68,6 +72,7 @@ struct Job {
     timings: Value,
 }
 struct Outcome {
+    artifact: Option<(String, Arc<Vec<u8>>)>,
     key: String,
     page: Arc<Page>,
     cache_hit: bool,
@@ -81,6 +86,15 @@ struct State {
     jobs: BTreeMap<u64, Job>,
     receipts: BTreeMap<String, (u64, String)>,
     cache: ResultCache,
+    artifacts: cache::ArtifactCache,
+}
+impl State {
+    fn available(&self, key: &str) -> bool {
+        self.cache.peek(key).is_some_and(|page| self.page_available(page))
+    }
+    fn page_available(&self, page: &Page) -> bool {
+        page.value.get("preview").and_then(|p| p.get("artifact_id")).and_then(Value::as_str).is_none_or(|id| self.artifacts.contains(id))
+    }
 }
 #[derive(Default)]
 pub struct AnalysisQueue {
@@ -92,7 +106,7 @@ fn receipt(state: &State, request_id: Option<&str>, fingerprint: &str) -> Result
         return Err(failure("REQUEST_ID_CONFLICT", "request_id was already used with different parameters", false));
     }
     let job = state.jobs.get(id).ok_or_else(|| failure("INTERNAL_ERROR", "missing analysis receipt job", false))?;
-    if job.finished && job.failure.is_none() && job.result_key.as_ref().is_none_or(|key| !state.cache.contains(key)) {
+    if job.finished && job.failure.is_none() && job.result_key.as_ref().is_none_or(|key| !state.available(key)) {
         return Err(failure("RESULT_EXPIRED", "original result expired; submit an explicit new request_id", false));
     }
     Ok(Some(json!({"job":id,"request_id":job.request_id})))
@@ -181,6 +195,9 @@ impl AnalysisQueue {
                 .as_ref()
                 .and_then(|key| state.cache.get(key))
                 .ok_or_else(|| failure("RESULT_EXPIRED", "analysis result expired; submit an explicit new request", false))?;
+            if !state.page_available(&page) {
+                return Err(failure("RESULT_EXPIRED", "preview artifact expired; submit a new request", false));
+            }
             (job, page)
         };
         // The lease protects this page from eviction while copying, without holding the queue lock.
@@ -192,11 +209,24 @@ impl AnalysisQueue {
         value["timings_ms"] = job.timings;
         Ok(value)
     }
+    pub fn read_artifact(&self, id: &str) -> Result<Value> {
+        use base64::Engine;
+        let data = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .artifacts
+            .get(id)
+            .ok_or_else(|| failure("RESULT_EXPIRED", "preview artifact is missing or expired", false))?;
+        // The Arc lease prevents eviction while the bounded binary response is encoded.
+        Ok(json!({"artifact_id":id,"mime_type":"video/mp4","bytes":data.len(),
+            "uri":format!("filmcraft://analysis/{id}"),"data":base64::engine::general_purpose::STANDARD.encode(&*data)}))
+    }
     pub fn list(&self) -> Vec<Value> {
         let state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         state.jobs.values().map(|job|json!({"id":job.id,"request_id":job.request_id,"label":"Media analysis","kind":"media_analysis",
             "status":job.status,"finished":job.finished,"progress":if job.finished {1.0}else{0.0},"done":u8::from(job.finished),"total":1,
-            "etaSeconds":null,"result":null,"result_expired":job.finished && job.failure.is_none() && job.result_key.as_ref().is_none_or(|key|!state.cache.contains(key))})).collect()
+            "etaSeconds":null,"result":null,"result_expired":job.finished && job.failure.is_none() && job.result_key.as_ref().is_none_or(|key|!state.available(key))})).collect()
     }
     pub fn cancel(&self, id: u64) -> bool {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
@@ -212,8 +242,10 @@ impl AnalysisQueue {
         true
     }
     pub fn clear_cache(&self) -> Value {
-        let (removed, bytes) = self.inner.lock().unwrap_or_else(PoisonError::into_inner).cache.clear_unused();
-        json!({"removed":removed,"bytes_removed":bytes})
+        let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let (removed, bytes) = state.cache.clear_unused();
+        let (artifacts, video_bytes) = state.artifacts.clear_unused();
+        json!({"removed":removed,"bytes_removed":bytes,"artifacts_removed":artifacts,"video_bytes_removed":video_bytes})
     }
 }
 impl Drop for AnalysisQueue {
@@ -224,7 +256,7 @@ impl Drop for AnalysisQueue {
         }
     }
 }
-fn process(work: Work, cancel: &AtomicBool, inner: &Arc<Mutex<State>>) -> Result<Outcome> {
+fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> Result<Outcome> {
     let begin = Instant::now();
     let version = cache::input_version(&work.input, cancel)?;
     let hash_before = begin.elapsed().as_secs_f64() * 1000.0;
@@ -232,13 +264,23 @@ fn process(work: Work, cancel: &AtomicBool, inner: &Arc<Mutex<State>>) -> Result
         return Err(failure("VERSION_MISMATCH", "source content does not match expected_version; inspect again before editing", false));
     }
     let key = cache::key(&json!({"version":version,"request":work.request.canonical(false)?,"context":work.input.cache_context()}))?;
-    let cached = inner.lock().unwrap_or_else(PoisonError::into_inner).cache.get(&key);
-    if let Some(page) = cached {
+    let cached = {
+        let mut state = inner.lock().unwrap_or_else(PoisonError::into_inner);
+        state.cache.get(&key).and_then(|page| {
+            let artifact = match page.value.get("preview").and_then(|p| p.get("artifact_id")).and_then(Value::as_str) {
+                Some(id) => Some((id.to_owned(), state.artifacts.get(id)?)),
+                None => None,
+            };
+            Some((page, artifact))
+        })
+    };
+    if let Some((page, artifact)) = cached {
         let begin = Instant::now();
         if cache::input_version(&work.input, cancel)? != version {
             return Err(failure("SOURCE_CHANGED", "source changed while validating cached output", true));
         }
         return Ok(Outcome {
+            artifact,
             key,
             page,
             cache_hit: true,
@@ -249,9 +291,20 @@ fn process(work: Work, cancel: &AtomicBool, inner: &Arc<Mutex<State>>) -> Result
     let source = work.input.open()?;
     let open_ms = begin.elapsed().as_secs_f64() * 1000.0;
     let begin = Instant::now();
+    let mut artifact = None;
     let mut value = match &work.request {
         Request::Inspect(_) => super::source::inspect(&source)?,
         Request::Frames(request) => super::frames::decode(&source, request)?,
+        Request::Preview(request) => {
+            let (mut value, bytes) = super::preview::generate(&source, request, cancel.clone())?;
+            if let Some(bytes) = bytes {
+                let id = format!("preview:{key}");
+                value["preview"]["artifact_id"] = json!(id);
+                value["preview"]["resource_uri"] = json!(format!("filmcraft://analysis/{id}"));
+                artifact = Some((id, bytes));
+            }
+            value
+        }
     };
     value["source_version"] = json!(version);
     let strategy = value.get("strategy").cloned().unwrap_or(Value::Null);
@@ -274,6 +327,7 @@ fn process(work: Work, cancel: &AtomicBool, inner: &Arc<Mutex<State>>) -> Result
         return Err(failure("SOURCE_CHANGED", "source changed during analysis; all generated output was discarded", true));
     }
     Ok(Outcome {
+        artifact,
         key,
         page,
         cache_hit: false,
@@ -309,7 +363,13 @@ fn worker(inner: &Arc<Mutex<State>>) {
 }
 fn finish(state: &mut State, id: u64, output: Result<Outcome>) {
     let output = output.and_then(|output| {
+        if state.jobs.get(&id).is_some_and(|job| job.cancel.load(Ordering::Relaxed)) {
+            return Err(failure("CANCELLED", "analysis was cancelled", false));
+        }
         state.cache.insert(output.key.clone(), output.page.clone())?;
+        if let Some((id, data)) = &output.artifact {
+            state.artifacts.insert(id.clone(), data.clone())?;
+        }
         Ok(output)
     });
     let Some(job) = state.jobs.get_mut(&id) else { return };
@@ -362,7 +422,7 @@ mod tests {
         finish(
             &mut queue.inner.lock().unwrap(),
             33,
-            Ok(Outcome { key: "33".into(), page: Page::new(json!({"status":"complete"})).unwrap(), cache_hit: false, timings: Value::Null }),
+            Ok(Outcome { artifact: None, key: "33".into(), page: Page::new(json!({"status":"complete"})).unwrap(), cache_hit: false, timings: Value::Null }),
         );
         let page = queue.result(33).unwrap();
         assert_eq!(page["finished"], true);

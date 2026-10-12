@@ -143,6 +143,10 @@ pub(super) struct ResultCache {
     bytes: usize,
 }
 impl ResultCache {
+    pub fn peek(&self, key: &str) -> Option<&Page> {
+        self.pages.get(key).map(AsRef::as_ref)
+    }
+    #[cfg(test)]
     pub fn contains(&self, key: &str) -> bool {
         self.pages.contains_key(key)
     }
@@ -232,5 +236,90 @@ mod tests {
         drop(active);
         let unicode = json!({"name":"素材", "escaped":"\\\""});
         assert_eq!(serialized_size(&unicode).unwrap(), serde_json::to_vec(&unicode).unwrap().len());
+    }
+}
+
+/// Video payloads have a separate budget; result pages retain only IDs, never eviction leases.
+#[derive(Default)]
+pub(super) struct ArtifactCache {
+    entries: BTreeMap<String, Arc<Vec<u8>>>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+impl ArtifactCache {
+    pub fn contains(&self, id: &str) -> bool {
+        self.entries.contains_key(id)
+    }
+    pub fn get(&mut self, id: &str) -> Option<Arc<Vec<u8>>> {
+        let data = self.entries.get(id)?.clone();
+        self.order.retain(|key| key != id);
+        self.order.push_back(id.into());
+        Some(data)
+    }
+    pub fn insert(&mut self, id: String, data: Arc<Vec<u8>>) -> Result<()> {
+        if self.entries.contains_key(&id) {
+            return Ok(());
+        }
+        if data.len() as u64 > super::preview::MAX_VIDEO_BYTES {
+            return Err(failure("RESOURCE_LIMIT", "preview exceeds the 24 MiB file budget", false));
+        }
+        for _ in 0..self.order.len() {
+            if self.entries.len() < 16 && self.bytes.saturating_add(data.len()) <= 512 * 1024 * 1024 {
+                break;
+            }
+            let Some(victim) = self.order.pop_front() else { break };
+            if self.entries.get(&victim).is_some_and(|data| Arc::strong_count(data) > 1) {
+                self.order.push_back(victim);
+            } else if let Some(removed) = self.entries.remove(&victim) {
+                self.bytes = self.bytes.saturating_sub(removed.len());
+            }
+        }
+        if self.entries.len() >= 16 || self.bytes.saturating_add(data.len()) > 512 * 1024 * 1024 {
+            return Err(failure("RESOURCE_LIMIT", "all video artifact slots are in use", true));
+        }
+        self.bytes = self.bytes.saturating_add(data.len());
+        self.order.push_back(id.clone());
+        self.entries.insert(id, data);
+        Ok(())
+    }
+    pub fn clear_unused(&mut self) -> (usize, usize) {
+        let before = (self.entries.len(), self.bytes);
+        self.entries.retain(|_, data| Arc::strong_count(data) > 1);
+        self.order.retain(|key| self.entries.contains_key(key));
+        self.bytes = self.entries.values().map(|data| data.len()).sum();
+        (before.0 - self.entries.len(), before.1 - self.bytes)
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+    #[test]
+    fn video_cache_evicts_lru_but_never_active_readers() {
+        let mut cache = ArtifactCache::default();
+        for i in 0..16 {
+            cache.insert(i.to_string(), Arc::new(vec![i])).unwrap();
+        }
+        let active = cache.get("0").unwrap();
+        cache.get("1").unwrap();
+        cache.insert("16".into(), Arc::new(vec![16])).unwrap();
+        assert!(cache.contains("0") && cache.contains("1") && !cache.contains("2"));
+        assert_eq!(cache.clear_unused(), (15, 15));
+        assert_eq!(active.as_slice(), &[0]);
+        assert!(cache.contains("0"));
+        drop(active);
+        assert_eq!(cache.clear_unused(), (1, 1));
+    }
+    #[test]
+    fn full_video_cache_refuses_eviction_of_readers() {
+        let mut cache = ArtifactCache::default();
+        let mut leases = Vec::new();
+        for i in 0..16 {
+            cache.insert(i.to_string(), Arc::new(vec![i])).unwrap();
+            leases.push(cache.get(&i.to_string()).unwrap());
+        }
+        assert!(cache.insert("17".into(), Arc::new(vec![17])).is_err());
+        assert_eq!(cache.clear_unused(), (0, 0));
+        assert_eq!(leases.len(), 16);
     }
 }

@@ -201,6 +201,40 @@ pub struct MediaFramesParams {
     pub max_frames: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MediaPreviewParams {
+    /// Imported project item ID.
+    pub item: u64,
+    /// Wait for completion, default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+    /// Retry receipt; reuse only for identical parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Required SHA256 source version, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+    /// Source range start, decimal Tick string; supply with end_ticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ticks: Option<String>,
+    /// Exclusive source end; at most 30 seconds. Omit both for the first 10 seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ticks: Option<String>,
+    /// Longest side, default 960, maximum 1920.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_side: Option<u32>,
+    /// Maximum frame rate, default and maximum 12; never increases source FPS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fps: Option<u32>,
+    /// Include available source audio, default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<bool>,
+    /// unknown (default), unsupported, or verified. Use verified only after the client/model has been qualified to consume video; otherwise PNG frames are returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_capability: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisResultParams {
@@ -478,6 +512,16 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Preview a short source clip",
+        description = "Read-only source preview: default 10 seconds, maximum 30 seconds, 960 pixels and 12 fps, at most 24 MiB. Unknown/unsupported video clients receive actual PNG image blocks. Only verified video clients receive a controlled H.264 MP4 resource; encoding success does not prove model consumption. Decimal Tick strings.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn media_preview_clip(&self, Parameters(p): Parameters<MediaPreviewParams>) -> Result<CallToolResult, McpError> {
+        let params = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        Ok(self.run_analysis("media.analysis.preview", params, None).await.unwrap_or_else(fail))
+    }
+
+    #[tool(
         title = "Read source analysis job",
         description = "Poll a media analysis job. Returns status, metadata and completed PNG image blocks; expired results fail explicitly.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -673,7 +717,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Use `media_inspect` and `media_frames` to read source metadata and thumbnail image blocks without timeline edits; `media_analysis_result` polls asynchronous analysis jobs. Source-analysis Tick values are decimal strings. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Use `media_inspect` and `media_frames` to read source metadata and thumbnail image blocks without timeline edits; `media_analysis_result` polls asynchronous analysis jobs. Use `media_preview_clip` for short previews; unknown video capability defaults to PNG evidence. Source-analysis Tick values are decimal strings. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`).";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -706,6 +750,7 @@ impl ServerHandler for FilmcraftMcp {
         if let Some(command) = match request.name.as_ref() {
             "media_inspect" => Some("media.analysis.inspect"),
             "media_frames" => Some("media.analysis.frames"),
+            "media_preview_clip" => Some("media.analysis.preview"),
             _ => None,
         } {
             let params = Value::Object(request.arguments.clone().unwrap_or_default());
@@ -753,6 +798,22 @@ impl ServerHandler for FilmcraftMcp {
         request: rmcp::model::ReadResourceRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ReadResourceResponse, McpError> {
+        if let Some(id) = request.uri.strip_prefix("filmcraft://analysis/") {
+            if !filmcraft_engine::media_analysis::preview::valid_id(id) {
+                return Err(McpError::resource_not_found("invalid preview resource", None));
+            }
+            let value = self.run("media.analysis.preview.read", json!({"artifact":id})).await.map_err(|e| McpError::resource_not_found(e.to_string(), None))?;
+            let data = value["data"]
+                .as_str()
+                .filter(|data| data.len() <= 32 * 1024 * 1024)
+                .ok_or_else(|| McpError::internal_error("invalid bounded preview response", None))?;
+            let resource = rmcp::model::ResourceContents::blob(data, request.uri).with_mime_type("video/mp4");
+            let mut result = rmcp::model::ReadResourceResult::new(vec![resource]);
+            if let Some((ttl, scope)) = cache_hints(&context, 0) {
+                result = result.with_ttl_ms(ttl).with_cache_scope(scope);
+            }
+            return Ok(result.into());
+        }
         let v = match request.uri.as_str() {
             DOCUMENT_URI => self.document().await,
             COMMANDS_URI => self.run("command.list", json!({})).await,
@@ -853,6 +914,37 @@ mod tests {
         async fn call(&mut self, id: u64, name: &str, arguments: Value) -> Value {
             self.ask(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await
         }
+    }
+
+    #[tokio::test]
+    async fn preview_stdio_fallback_video_resource_and_expiration() {
+        let (session, item, _fixture) = super::media_analysis_tests::session();
+        let mut client = Client::start(session);
+        client.init().await;
+        let fallback = client.call(1, "media_preview_clip", json!({"item":item,"max_side":8})).await;
+        assert_eq!(fallback["result"]["structuredContent"]["delivery"], "frames", "{fallback}");
+        assert!(fallback["result"]["content"].as_array().unwrap().iter().any(|block| block["type"] == "image"));
+        let movie = client
+            .call(
+                2,
+                "media_preview_clip",
+                json!({"item":item,"max_side":8,"start_ticks":"0","end_ticks":"254016000000","video_capability":"verified","audio":false}),
+            )
+            .await;
+        assert_eq!(movie["result"]["structuredContent"]["status"], "complete", "{movie}");
+        let uri = movie["result"]["structuredContent"]["preview"]["resource_uri"].clone();
+        assert!(movie["result"]["content"].as_array().unwrap().iter().any(|block| block["type"] == "resource_link" && block["uri"] == uri));
+        let resource = client.ask(json!({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":uri}})).await;
+        assert_eq!(resource["result"]["contents"][0]["mimeType"], "video/mp4", "{resource}");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(resource["result"]["contents"][0]["blob"].as_str().unwrap()).unwrap();
+        assert!(bytes.windows(4).any(|b| b == b"ftyp"));
+        for (index, uri) in ["file:///etc/passwd", "filmcraft://analysis/../../private", "filmcraft://analysis/preview:garbage"].iter().enumerate() {
+            let response = client.ask(json!({"jsonrpc":"2.0","id":4+index,"method":"resources/read","params":{"uri":uri}})).await;
+            assert!(response.get("error").is_some(), "{response}");
+        }
+        client.call(8, "command_run", json!({"id":"media.analysis.clearCache","params":{}})).await;
+        let expired = client.ask(json!({"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":uri}})).await;
+        assert!(expired.get("error").is_some(), "{expired}");
     }
 
     /// #499: `media_import` takes `paths` (a required array), and forwards `bin` / `image_sequence` to `file.import`.
