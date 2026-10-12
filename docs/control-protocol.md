@@ -245,7 +245,21 @@ Affected media (including linked clips) require matching content versions. Hashi
 runs off the Session thread, before and after isolated computation. Unsupported native-worker
 hosts return `CAPABILITY_UNAVAILABLE`.
 
-Success reports `committed:false`, per-step affected clips and a bounded changed-item summary.
+Success reports `committed:false` and actual before/after candidate differences in each
+`steps[].diff` and the whole-plan `diff`. Each `entities` row identifies `sequence`, `kind`
+(`clip`, `caption`, `transition`, `marker`), `id`, `change` (`created`, `deleted`, `modified`),
+and `before`/`after` summaries (null for an absent entity). Summaries include track/source IDs
+where applicable and decimal-string `start`, `duration`, `end`, `source_in` timing, so clamped
+trims and collateral overwrite/split/ripple edits are visible. Shared graphic peers across
+sequences are included; `content_changed` flags effects/graphic/caption content changes.
+These are explicitly `summary_only`, not a full project-property patch: large effect/keyframe
+payloads are omitted, text fields show at most 256 Unicode characters with truncation flags.
+All steps share a 256-row / 224 KiB entity budget; the whole-plan diff has a separate identical
+budget. `entity_count` and `omitted_entity_count` include undisplayed changes. Per-step
+`affected_clips` contains displayed changed clip/caption IDs, with `affected_clip_count` and
+`omitted_affected_clip_count` reporting the total and omitted counts. `diff.changed_items`
+still lists up to 1000 changed project item IDs, with total and omitted counts.
+If any changes are omitted, narrow/split the plan and preflight again before approving it.
 Step errors identify the zero-based step; whole-plan errors include `REVISION_MISMATCH`,
 `VERSION_MISMATCH`, `SOURCE_CHANGED`, `PLAN_BUSY`, `CANCELLED` and resource limits.
 Preflight changes neither the document nor editor state/history/revision and is **not a lock**

@@ -1,6 +1,7 @@
 //! Opt-in editing plans. Hashing and pure editing execute outside the live Session.
 mod dedup;
 mod queue;
+mod report;
 #[cfg(test)]
 mod tests;
 mod transaction;

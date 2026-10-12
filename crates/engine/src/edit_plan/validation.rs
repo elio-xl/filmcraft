@@ -271,6 +271,7 @@ fn check_project(p: &Project) -> Result<()> {
             q.check().map_err(invalid)?;
             for track in q.all_tracks() {
                 count = count.saturating_add(track.items.len());
+                count = count.saturating_add(track.transitions.len());
                 for clip in &track.items {
                     let scaled = clip.duration.0 as f64 * clip.speed.abs();
                     if !scaled.is_finite() || scaled < 0.0 || scaled > Tick::MAX.0 as f64 {
@@ -289,7 +290,10 @@ fn check_project(p: &Project) -> Result<()> {
                     }
                 }
             }
-            count = count.saturating_add(q.caption_tracks.iter().map(|t| t.captions.len()).sum::<usize>());
+            count = count.saturating_add(q.markers.len());
+            for track in &q.caption_tracks {
+                count = count.saturating_add(track.captions.len());
+            }
             if count > 100000 {
                 return Err(invalid("plan project exceeds 100000 timeline entities"));
             }
@@ -344,6 +348,7 @@ pub(super) fn compute(snapshot: &Snapshot, plan: &Plan, verified: &BTreeMap<Item
     let mut project = (*snapshot.project).clone();
     let mut state = snapshot.state.clone();
     let mut reports = Vec::new();
+    let mut report_budget = super::report::Budget::default();
     for (index, step) in plan.steps.iter().enumerate() {
         check_cancelled()?;
         let result = (|| {
@@ -435,8 +440,10 @@ pub(super) fn compute(snapshot: &Snapshot, plan: &Plan, verified: &BTreeMap<Item
                 crate::graphic_templates::sync_source_graphics_project(&mut project);
             }
             check_project(&project)?;
+            let diff = super::report::between(&lookup, &project, &mut report_budget)?;
             Ok(json!({"index":index,"id":step.id,"reason":step.reason,"status":"valid",
-                "affected_clips":affected.iter().take(1000).map(|id|id.0).collect::<Vec<_>>(),"affected_clip_count":affected.len()}))
+                "affected_clips":diff.affected,"affected_clip_count":diff.affected_count,
+                "omitted_affected_clip_count":diff.affected_count.saturating_sub(diff.affected.len()),"diff":diff.value}))
         })();
         #[cfg(test)]
         if plan.panic_after_step == Some(index) {
@@ -445,7 +452,11 @@ pub(super) fn compute(snapshot: &Snapshot, plan: &Plan, verified: &BTreeMap<Item
         reports.push(result.map_err(|e: EngineError| invalid(format!("step {index} ({}): {e}", step.id)))?);
     }
     let changed = project.items.iter().filter(|(id, item)| snapshot.project.items.get(id) != Some(*item)).map(|(id, _)| id.0).collect::<Vec<_>>();
+    let mut diff = super::report::between(&snapshot.project, &project, &mut super::report::Budget::default())?.value;
+    diff["changed_items"] = json!(changed.iter().take(1000).copied().collect::<Vec<_>>());
+    diff["changed_item_count"] = json!(changed.len());
+    diff["omitted_changed_item_count"] = json!(changed.len().saturating_sub(1000));
     let report = json!({"schema_version":1,"status":"complete","committed":false,"expected_revision":snapshot.revision.to_string(),
-        "steps":reports,"diff":{"changed_items":changed.iter().take(1000).copied().collect::<Vec<_>>(),"changed_item_count":changed.len()}});
+        "steps":reports,"diff":diff});
     Ok(Candidate { project, state, report })
 }

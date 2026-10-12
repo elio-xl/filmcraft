@@ -320,10 +320,150 @@ fn plan_graphic_edits_keep_shared_instances_synchronized() {
     let layers = &s.project.source_graphics[&filmcraft_project::ItemId(item)].layers;
     let copies = s.active_sequence().unwrap().all_tracks().flat_map(|t| &t.items).filter(|c| c.item.0 == item).collect::<Vec<_>>();
     assert_eq!(copies.len(), 2);
+    assert_eq!(result["steps"][0]["affected_clip_count"], 2, "{result}");
+    assert_eq!(result["diff"]["entity_count"], 2, "{result}");
     for c in copies {
         assert_eq!(&c.effects.iter().filter(|e| filmcraft_project::graphic::is_layer(e)).cloned().collect::<Vec<_>>(), layers);
     }
     assert!(serde_json::to_string(layers).unwrap().contains("shared replacement"));
+}
+
+fn report_fixture() -> Session {
+    use filmcraft_time::Tick;
+    let mut s = demo();
+    let mut project = (*s.project).clone();
+    let ids = [project.alloc_id(), project.alloc_id(), project.alloc_id()];
+    let q = project.sequence_mut(s.state.active_sequence.unwrap()).unwrap();
+    let template = q.video_tracks[0].items[0].clone();
+    for track in q.all_tracks_mut() {
+        track.items.clear();
+        track.transitions.clear();
+    }
+    q.markers.clear();
+    q.caption_tracks.clear();
+    for (index, id) in ids.into_iter().enumerate() {
+        let mut clip = template.clone();
+        clip.id = filmcraft_project::ClipId(id);
+        clip.start = Tick(index as i64 * 20 * TPS);
+        clip.duration = Tick(10 * TPS);
+        clip.source_in = Tick::ZERO;
+        clip.speed = 1.0;
+        clip.link = None;
+        q.video_tracks[0].items.push(clip);
+    }
+    s.project = std::sync::Arc::new(project);
+    s
+}
+fn candidate_report(s: &Session, steps: Value) -> super::validation::Candidate {
+    let p = json!({"session_id":s.edit_plans.session_id(),"request_id":"report","expected_revision":s.revision.to_string(),"source_versions":[],"steps":steps});
+    let parsed = super::validation::parse(&p).unwrap();
+    let verified = s.project.items.keys().filter_map(|id| s.project.resolve_media(*id).map(|(root, m, _)| (root, m.info.duration))).collect();
+    super::validation::compute(&super::validation::Snapshot { project: s.project.clone(), state: s.state.clone(), revision: s.revision }, &parsed, &verified)
+        .unwrap()
+}
+fn reported_entity<'a>(diff: &'a Value, kind: &str, id: u64) -> &'a Value {
+    diff["entities"].as_array().unwrap().iter().find(|v| v["kind"] == kind && v["id"] == id).unwrap_or_else(|| panic!("missing {kind} {id} in {diff}"))
+}
+#[test]
+fn edit_plan_report_shows_overwrite_split_and_copy() {
+    let s = report_fixture();
+    let q = s.active_sequence().unwrap();
+    let track = &q.video_tracks[0];
+    let a = track.items[0].id.0;
+    let b = track.items[1].id.0;
+    let before = snapshot(&s);
+    for copy in [false, true] {
+        let candidate = candidate_report(
+            &s,
+            json!([
+                {"id":"timeline.trim","params":{"clip":a,"edge":"out","delta":(-6*TPS).to_string()},"reason":"four seconds"},
+                {"id":"timeline.move","params":{"moves":[{"clip":a,"track":track.id.0,"time":(23*TPS).to_string()}],"copy":copy},"reason":"overwrites middle of B"}
+            ]),
+        );
+        let diff = &candidate.report["steps"][1]["diff"];
+        let b_change = reported_entity(diff, "clip", b);
+        assert_eq!(b_change["before"]["end"], (30 * TPS).to_string());
+        assert_eq!(b_change["after"]["end"], (23 * TPS).to_string());
+        assert_eq!(diff["entities"].as_array().unwrap().iter().filter(|v| v["change"] == "created").count(), if copy { 2 } else { 1 });
+        assert_eq!(snapshot(&s), before);
+    }
+    let candidate = candidate_report(
+        &s,
+        json!([{"id":"timeline.move","params":{"moves":[{"clip":a,"track":track.id.0,"time":(20*TPS).to_string()}]},"reason":"replace all of B"}]),
+    );
+    let removed = reported_entity(&candidate.report["diff"], "clip", b);
+    assert_eq!(removed["change"], "deleted");
+    assert!(removed["after"].is_null());
+}
+#[test]
+fn edit_plan_report_shows_ripple_caption_and_clamped_boundary() {
+    let mut s = report_fixture();
+    let caption = s.execute("captions.add", json!({"time":45*TPS,"durationSeconds":1,"text":"before"})).unwrap()["caption"].as_u64().unwrap();
+    let q = s.active_sequence().unwrap();
+    let a = q.video_tracks[0].items[0].id.0;
+    let b = q.video_tracks[0].items[1].id.0;
+    let track = q.video_tracks[0].id.0;
+    let caption_start = q.find_caption(filmcraft_project::ClipId(caption)).unwrap().1.start.0;
+    let candidate = candidate_report(
+        &s,
+        json!([
+            {"id":"timeline.trim","params":{"clip":a,"edge":"out","mode":"ripple","delta":(-TPS).to_string()},"reason":"ripple"},
+            {"id":"timeline.move","params":{"moves":[{"clip":a,"track":track,"time":(20*TPS).to_string()}],"insert":true,"copy":true},"reason":"insert shifts captions"},
+            {"id":"captions.setText","params":{"caption":caption,"text":"after"},"reason":"caption"}
+        ]),
+    );
+    let diff = &candidate.report["steps"][0]["diff"];
+    assert_eq!(reported_entity(diff, "clip", b)["after"]["start"], (19 * TPS).to_string());
+    assert_eq!(reported_entity(&candidate.report["steps"][1]["diff"], "caption", caption)["after"]["start"], (caption_start + 9 * TPS).to_string());
+    let caption_change = reported_entity(&candidate.report["steps"][2]["diff"], "caption", caption);
+    assert_eq!(caption_change["before"]["text"], "before");
+    assert_eq!(caption_change["after"]["text"], "after");
+    assert_eq!(candidate.report["steps"][2]["affected_clip_count"], 1);
+    // Place the neighbor before the demo source's 18-second handle limit so this exercises
+    // timeline clamping, independently of the source-duration clamp.
+    let mut project = (*s.project).clone();
+    project.sequence_mut(s.state.active_sequence.unwrap()).unwrap().video_tracks[0].items[1].start = filmcraft_time::Tick(15 * TPS);
+    s.project = std::sync::Arc::new(project);
+    let candidate =
+        candidate_report(&s, json!([{"id":"timeline.trim","params":{"clip":a,"edge":"out","delta":(30*TPS).to_string()},"reason":"clamped to neighbor"}]));
+    let changed = reported_entity(&candidate.report["diff"], "clip", a);
+    assert_eq!(changed["after"]["end"], (15 * TPS).to_string());
+    assert_eq!(changed["before"]["end"], (10 * TPS).to_string());
+}
+#[test]
+fn edit_plan_report_bounds_rows_and_unicode_text() {
+    let mut s = report_fixture();
+    let mut project = (*s.project).clone();
+    let ids = (0..600).map(|_| project.alloc_id()).collect::<Vec<_>>();
+    let q = project.sequence_mut(s.state.active_sequence.unwrap()).unwrap();
+    let template = q.video_tracks[0].items[0].clone();
+    q.video_tracks[0].items.clear();
+    for (index, id) in ids.into_iter().enumerate() {
+        let mut c = template.clone();
+        c.id = filmcraft_project::ClipId(id);
+        c.start = filmcraft_time::Tick(index as i64 * 20 * TPS);
+        q.video_tracks[0].items.push(c);
+    }
+    s.project = std::sync::Arc::new(project);
+    let caption = s.execute("captions.add", json!({"time":13000*TPS,"text":"字".repeat(2000)})).unwrap()["caption"].clone();
+    let a = s.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    let candidate = candidate_report(
+        &s,
+        json!([
+            {"id":"timeline.trim","params":{"clip":a,"edge":"out","mode":"ripple","delta":(-TPS).to_string()},"reason":"many collateral edits"},
+            {"id":"captions.setText","params":{"caption":caption,"text":"新".repeat(2000)},"reason":"large Unicode caption"}
+        ]),
+    );
+    let diff = &candidate.report["diff"];
+    let shown = diff["entities"].as_array().unwrap().len();
+    assert!(shown <= 256);
+    assert_eq!(diff["entity_count"], 601);
+    assert_eq!(diff["omitted_entity_count"], 601 - shown);
+    assert!(serde_json::to_vec(&candidate.report).unwrap().len() <= 1024 * 1024);
+    let caption_only = candidate_report(&s, json!([{"id":"captions.setText","params":{"caption":caption,"text":"新".repeat(2000)},"reason":"text bound"}]));
+    let entity = &caption_only.report["diff"]["entities"][0];
+    assert_eq!(entity["after"]["text_truncated"], true);
+    assert!(entity["after"]["text"].as_str().unwrap().chars().count() <= 256);
 }
 
 #[test]
