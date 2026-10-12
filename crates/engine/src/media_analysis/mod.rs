@@ -5,6 +5,7 @@ pub mod frames;
 pub mod jobs;
 pub mod preview;
 pub mod request;
+pub mod shots;
 pub mod source;
 
 /// Machine-readable failure shared by analysis jobs and per-frame results.
@@ -55,6 +56,16 @@ pub fn result(session: &crate::Session, params: &serde_json::Value) -> crate::Re
 pub fn commands() -> Vec<crate::CommandSpec> {
     use crate::commands::{CommandSpec, always};
     vec![
+        CommandSpec {
+            id: "media.analysis.shots",
+            label: "Find Source Shot Candidates",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"request_id":str?,"expected_version":str?,"start_ticks":str?,"end_ticks":str?,"sensitivity":0..100?,"min_shot_frames":1..10000?}"#,
+            enabled: always,
+            run: shots::start,
+            journal: false,
+        },
         CommandSpec {
             id: "media.analysis.preview",
             label: "Preview Source Clip",
@@ -120,3 +131,6 @@ pub fn commands() -> Vec<crate::CommandSpec> {
 
 #[cfg(test)]
 mod preview_tests;
+
+#[cfg(test)]
+mod shots_tests;

@@ -21,6 +21,7 @@ pub enum Request {
     Inspect(InspectRequest),
     Frames(AnalysisRequest),
     Preview(super::preview::Request),
+    Shots(super::shots::Request),
 }
 impl Request {
     fn request_id(&self) -> Option<&str> {
@@ -28,6 +29,7 @@ impl Request {
             Self::Inspect(r) => r.request_id.as_deref(),
             Self::Frames(r) => r.request_id.as_deref(),
             Self::Preview(r) => r.request_id.as_deref(),
+            Self::Shots(r) => r.request_id.as_deref(),
         }
     }
     fn expected_version(&self) -> Option<&str> {
@@ -35,6 +37,7 @@ impl Request {
             Self::Inspect(r) => r.expected_version.as_deref(),
             Self::Frames(r) => r.expected_version.as_deref(),
             Self::Preview(r) => r.expected_version.as_deref(),
+            Self::Shots(r) => r.expected_version.as_deref(),
         }
     }
     pub fn item(&self) -> filmcraft_project::ItemId {
@@ -42,6 +45,7 @@ impl Request {
             Self::Inspect(r) => r.item,
             Self::Frames(r) => r.item,
             Self::Preview(r) => r.item,
+            Self::Shots(r) => r.item,
         }
     }
     fn canonical(&self, include_version: bool) -> Result<Value> {
@@ -295,6 +299,7 @@ fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> R
     let mut value = match &work.request {
         Request::Inspect(_) => super::source::inspect(&source)?,
         Request::Frames(request) => super::frames::decode(&source, request)?,
+        Request::Shots(request) => super::shots::analyse(&source, request)?,
         Request::Preview(request) => {
             let (mut value, bytes) = super::preview::generate(&source, request, cancel.clone())?;
             if let Some(bytes) = bytes {

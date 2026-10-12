@@ -200,3 +200,11 @@ This qualifies image fallback and MP4 encoding/resource/decoder transport. Nativ
 tools are still absent from this Codex session, and direct model video/audio consumption is **not
 qualified**. Keep `video_capability` unknown unless that separate client/model verification has
 been performed. A returned or locally decoded MP4 does not establish model video consumption.
+
+## P1 AP02 source shot candidates
+
+`shots_tests` covers two hard cuts, unchanged document/history, flash ambiguity, bad-frame gaps,
+hostile parameters, ten-minute coverage and the 1000-candidate cap. Existing `scene_detect` and
+render `scene::tests` remain regression gates. The CLI preview acceptance above also calls the
+real `media_shots` MCP tool for seconds 2–6, expecting two candidates split at source second 4,
+and verifies the document/history still match their pre-analysis snapshots.

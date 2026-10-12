@@ -13,7 +13,7 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const ENVELOPE_RESERVE: usize = 4096;
 
 pub(crate) fn ensure_request_id(command: &str, params: &mut Value) {
-    if !matches!(command, "media.analysis.inspect" | "media.analysis.frames" | "media.analysis.preview") {
+    if !matches!(command, "media.analysis.inspect" | "media.analysis.frames" | "media.analysis.preview" | "media.analysis.shots") {
         return;
     }
     if let Some(fields) = params.as_object_mut() {

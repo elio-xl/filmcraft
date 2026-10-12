@@ -235,6 +235,34 @@ pub struct MediaPreviewParams {
     pub video_capability: Option<String>,
 }
 
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MediaShotsParams {
+    /// Imported project item ID.
+    pub item: u64,
+    /// Wait for completion, default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+    /// Retry receipt; reuse only for identical parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Required SHA256 source version, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+    /// Source range start, decimal Tick string; supply with end_ticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ticks: Option<String>,
+    /// Exclusive source end. A page scans at most ten minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ticks: Option<String>,
+    /// Integer 0..100, default 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<u32>,
+    /// Minimum gap between cut candidates, 1..10000 frames, default 6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_shot_frames: Option<u32>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisResultParams {
@@ -522,6 +550,16 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Detect source shot candidates",
+        description = "Read-only candidate shot ranges and representative source times; no semantic scene labels or timeline edits. Nominal frame-grid sampling, at most ten minutes, 72000 samples and 1000 candidates. Partial results report missing/remaining ranges. Sensitivity defaults to 50, minimum shot gap to 6 frames. Decimal Tick strings.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn media_shots(&self, Parameters(p): Parameters<MediaShotsParams>) -> Result<CallToolResult, McpError> {
+        let params = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        Ok(self.run_analysis("media.analysis.shots", params, None).await.unwrap_or_else(fail))
+    }
+
+    #[tool(
         title = "Read source analysis job",
         description = "Poll a media analysis job. Returns status, metadata and completed PNG image blocks; expired results fail explicitly.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -751,6 +789,7 @@ impl ServerHandler for FilmcraftMcp {
             "media_inspect" => Some("media.analysis.inspect"),
             "media_frames" => Some("media.analysis.frames"),
             "media_preview_clip" => Some("media.analysis.preview"),
+            "media_shots" => Some("media.analysis.shots"),
             _ => None,
         } {
             let params = Value::Object(request.arguments.clone().unwrap_or_default());

@@ -169,6 +169,7 @@ engine. Starting a job performs no decoding or hashing on the caller/UI thread.
 | `media.analysis.inspect` | `{item, request_id?, expected_version?}` | `{job, request_id}` |
 | `media.analysis.frames` | `{item, request_id?, expected_version?, strategy?, start_ticks?, end_ticks?, times_ticks?, max_frames?, max_side?}` | `{job, request_id}` |
 | `media.analysis.preview` | `{item, request_id?, expected_version?, start_ticks?, end_ticks?, max_side?, max_fps?, audio?, video_capability?}` | `{job, request_id}`; PNG fallback unless video capability is verified |
+| `media.analysis.shots` | `{item, request_id?, expected_version?, start_ticks?, end_ticks?, sensitivity?, min_shot_frames?}` | `{job, request_id}`; read-only shot candidates |
 | `media.analysis.preview.read` | `{artifact}` | bounded base64 MP4 resource; no filesystem paths |
 | `media.analysis.result` | `{job}` | pending status or a complete/partial/error page |
 | `media.analysis.clearCache` | `{}` | unused cache entries/bytes removed |
@@ -184,7 +185,7 @@ timeline previews and does not seek, select or insert clips.
 ## MCP
 `filmcraft-cli mcp` serves MCP on stdio: headless (in-process session; `--demo` / `--project p.fcproj`)
 or `--bridge 127.0.0.1:9876` to drive the running app. Tools: `command_list`, `command_run`,
-`command_batch`, `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`, `media_import`, `media_inspect`, `media_frames`, `media_preview_clip`, `media_analysis_result`,
+`command_batch`, `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`, `media_import`, `media_inspect`, `media_frames`, `media_preview_clip`, `media_shots`, `media_analysis_result`,
 `render_frame`, `ui_inspect`, `ui_elements`, `ui_click`, `ui_drag`, `ui_key`, `ui_type`, `ui_screenshot`,
 `ui_control`; resources `filmcraft://document` and `filmcraft://commands`. `.mcp.json` registers both.
 Annotations, argument checking, errors and export progress / cancellation:

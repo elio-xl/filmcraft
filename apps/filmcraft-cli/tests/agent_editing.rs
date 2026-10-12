@@ -410,6 +410,18 @@ fn source_preview_video_and_png_fallback_round_trip() {
         assert!((2 * TPS..6 * TPS).contains(&time));
     }
     let png_ms = started.elapsed().as_millis();
+    let shots =
+        metadata(&client.good(
+            "media_shots",
+            json!({"item":item,"expected_version":meta["source_version"],"start_ticks":(2*TPS).to_string(),"end_ticks":(6*TPS).to_string()}),
+        ));
+    assert_eq!(shots["candidate_only"], true);
+    let candidates = shots["shots"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0]["start_ticks"], (2 * TPS).to_string());
+    assert_eq!(candidates[0]["end_ticks"], (4 * TPS).to_string());
+    assert_eq!(candidates[1]["end_ticks"], (6 * TPS).to_string());
+
     let started = Instant::now();
     let movie = client.good("media_preview_clip", json!({"item":item,"expected_version":meta["source_version"],"start_ticks":(2*TPS).to_string(),"end_ticks":(6*TPS).to_string(),"max_side":160,"audio":false,"video_capability":"verified"}));
     let video = metadata(&movie);

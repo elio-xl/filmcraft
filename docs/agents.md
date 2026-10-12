@@ -416,3 +416,18 @@ request receipts return `RESULT_EXPIRED`; use a new request ID to regenerate. Ca
 source-version changes, and decode failures discard output. Corrupt source frames are never
 certified as successful black-frame previews. Bridge resource reads alone allow a 36 MiB JSON
 reply for base64 expansion; other Bridge calls retain their 16 MiB limit.
+
+### Source shot candidates (P1)
+
+`media_shots` maps to `media.analysis.shots` and uses the same asynchronous job, cancellation,
+version and receipt contracts. Supply an imported `item`, optional paired source `start_ticks` /
+`end_ticks`, integer `sensitivity` (0–100, default 50) and `min_shot_frames` (1–10000, default 6).
+It samples the source nominal frame grid and reports actual decoded timestamps. Each candidate
+has source `start_ticks`, exclusive `end_ticks`, midpoint request and actual representative time.
+These are visual change candidates, not semantic scene classifications: flashes may create cuts,
+and very short variable-frame-rate shots between sample times may be missed.
+
+One page scans at most ten minutes / 72000 samples and returns at most 1000 candidates. Check
+`covered_ranges`, `missing_ranges`, `remaining_ranges` and `errors`; resume uncovered ranges explicitly.
+Decode failures split coverage: the detector never infers continuity across a missing interval.
+No timeline cuts, selection, playhead changes or undo entries are created.
