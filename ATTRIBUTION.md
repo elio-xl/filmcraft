@@ -164,3 +164,9 @@ SHA-256 (`crates/speech/src/models.rs`, `docs/transcripts.md`).
 | Asset | Author | Source | Licence |
 |---|---|---|---|
 | Whisper tiny / base / small speech-recognition weights (`model.safetensors`, `config.json`, `generation_config.json`, `tokenizer.json`) | OpenAI | `https://huggingface.co/openai/whisper-{tiny,base,small}` (revisions `169d4a43…`, `e37978b9…`, `973afd24…`); weights released with `https://github.com/openai/whisper` | MIT (weights and code, github.com/openai/whisper); the Hugging Face conversion is labelled Apache-2.0 |
+
+## Generated agent acceptance media
+
+| Generator / assets | Author | Source | Licence |
+|---|---|---|---|
+| `apps/filmcraft-cli/tests/agent_editing.rs`: original shapes, seven-segment labels, checker, PNG and sine audio; generated MOV/PNG/WAV files stay in ignored `target/fixtures/agent-editing/` with individual sidecars | FilmCraft contributors | Original procedural test artwork | MIT OR Apache-2.0 |

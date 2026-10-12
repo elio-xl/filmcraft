@@ -152,6 +152,8 @@ across separate tool calls, supply your own stable id. Headless and Bridge use t
 analysis pipeline. Bridge response lines have a finite 16 MiB limit; oversize replies discard the
 connection and fail without automatic replay.
 
+For a reproducible thirty-second editing scenario, fixture details and qualification evidence, see [agent video editing tests](testing/agent-video-editing.md).
+
 Image blocks and the metadata copies follow the [MCP tool-result specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
 
 ### Long exports: progress and cancellation

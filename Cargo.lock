@@ -1794,19 +1794,23 @@ version = "0.6.0"
 name = "filmcraft-cli"
 version = "0.6.0"
 dependencies = [
+ "base64 0.22.1",
  "filmcraft-automation",
  "filmcraft-codecs",
  "filmcraft-engine",
  "filmcraft-export",
  "filmcraft-gpu",
+ "filmcraft-isobmff",
  "filmcraft-media",
  "filmcraft-mpegts",
  "filmcraft-mxf",
  "filmcraft-ogg",
  "filmcraft-platform",
  "filmcraft-project",
+ "filmcraft-prores",
  "filmcraft-render",
  "filmcraft-time",
+ "image",
  "serde_json",
  "tokio",
 ]

@@ -162,12 +162,12 @@ AE01 至 AE06 共享接口，默认按顺序实施；采用多执行者时须使
 
 **Interfaces:** 使用现有 `command_list`、`command_run`、`command_batch`、`doc_inspect`、`render_preview` 和 AE06 工具。新增测试辅助 `generate_fixtures(dir: &std::path::Path) -> std::path::PathBuf`，返回夹具清单文件路径；仅在测试中使用 expect/unwrap。
 
-- [ ] 写 `agent_editing_round_trip`：程序生成三段具有明确场景和帧编号的视频、一张 PNG、一段音频；通过 stdio MCP 导入、分析、构建 30 秒 1280×720/25fps 序列、添加标题和配乐，保存并重开，导出。
-- [ ] 对时间线时长、素材源入出点、标题、音轨和重开后的工程内容做结构断言；对导出尺寸、时长和代表帧做媒体探测及图像断言。帧映射还覆盖分数帧率、变帧率、重复使用、变速和倒放；调用现有 TrackItem 时间映射，不新增另一套编辑时间算法。
-- [ ] 写 `failed_batch_can_be_recovered`：第二步注入不存在的命令，断言第一步保留、后续未执行，重新读取状态后可以撤销第一步。先运行 `cargo test -p filmcraft-cli --test agent_editing` 确认测试能暴露未完成路径。
-- [ ] 测试生成使用现有 Rust 生成器、编码器及 PNG/WAV 输出；可选 FFmpeg 仅作外部 oracle。生成失败必须失败，不用 SKIPPED 掩盖 P0 必需测试。文档列出夹具参数、原始命令响应和重现方法。
-- [ ] 在真实桌面 Bridge 再跑同一场景，并核对分析前后的工程、播放头、选区和撤销历史；模拟 Bridge 通过不能替代真实桌面验证。
-- [ ] 重跑 CLI 验收与全量门禁，通过后提交 `AE07: Verify end-to-end agent editing with generated media`。
+- [x] 写 `agent_editing_round_trip`：程序生成三段具有明确场景和帧编号的视频、一张 PNG、一段音频；通过 stdio MCP 导入、分析、构建 30 秒 1280×720/25fps 序列、添加标题和配乐，保存并重开，导出。
+- [x] 对时间线时长、素材源入出点、标题、音轨和重开后的工程内容做结构断言；对导出尺寸、时长和代表帧做媒体探测及图像断言。帧映射还覆盖分数帧率、变帧率、重复使用、变速和倒放；调用现有 TrackItem 时间映射，不新增另一套编辑时间算法。
+- [x] 写 `failed_batch_can_be_recovered`：第二步注入不存在的命令，断言第一步保留、后续未执行，重新读取状态后可以撤销第一步。先运行 `cargo test -p filmcraft-cli --test agent_editing` 确认测试能暴露未完成路径。
+- [x] 测试生成使用现有 Rust 生成器、编码器及 PNG/WAV 输出；可选 FFmpeg 仅作外部 oracle。生成失败必须失败，不用 SKIPPED 掩盖 P0 必需测试。文档列出夹具参数、原始命令响应和重现方法。
+- [x] 在真实桌面 Bridge 再跑同一场景，并核对分析前后的工程、播放头、选区和撤销历史；模拟 Bridge 通过不能替代真实桌面验证。
+- [x] 重跑 CLI 验收与全量门禁，通过后提交 `AE07: Verify end-to-end agent editing with generated media`。
 
 ## AE08 Codex 接入与发布门禁
 

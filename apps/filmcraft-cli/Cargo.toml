@@ -33,3 +33,9 @@ filmcraft-ogg = { workspace = true }
 filmcraft-automation = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+filmcraft-prores = { workspace = true }
+filmcraft-isobmff = { workspace = true }
