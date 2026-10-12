@@ -1,6 +1,7 @@
 //! Read-only, bounded analysis of project source media.
 
 pub mod request;
+pub mod source;
 
 /// Machine-readable failure shared by analysis jobs and per-frame results.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]

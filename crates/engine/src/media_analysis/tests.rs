@@ -191,3 +191,221 @@ fn analysis_request_inspect_accepts_only_common_fields() {
         assert!(parse_inspect(&p).is_err(), "accepted {p}");
     }
 }
+
+use super::source;
+use crate::{Services, Session};
+use filmcraft_project::{ItemId, ItemKind, Label};
+use std::sync::{Arc, Mutex};
+
+struct AnalysisHost {
+    bytes: Mutex<Vec<u8>>,
+}
+impl Services for AnalysisHost {
+    fn read_file(&self, _path: &str) -> std::io::Result<Vec<u8>> {
+        Ok(self.bytes.lock().unwrap().clone())
+    }
+    fn write_file(&self, _path: &str, _bytes: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::other("read-only test host"))
+    }
+    fn reader(&self, _path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+        Some(Ok(Arc::new(filmcraft_media::reader::MemReader(self.bytes.lock().unwrap().clone().into()))))
+    }
+}
+
+fn analysis_image_session() -> (Session, ItemId, Arc<AnalysisHost>) {
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::write_buffer_with_format(&mut png, &[255; 8 * 4 * 4], 8, 4, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).unwrap();
+    let bytes = png.into_inner();
+    let host = Arc::new(AnalysisHost { bytes: Mutex::new(bytes.clone()) });
+    let mut session = Session::new(host.clone());
+    let item = crate::commands::import_bytes(&mut session, "source.png", bytes.into(), None).unwrap();
+    (session, item, host)
+}
+
+#[test]
+fn unplaced_media_is_inspectable() {
+    let (session, item, _) = analysis_image_session();
+    assert!(session.state.active_sequence.is_none());
+    let project = serde_json::to_value(&*session.project).unwrap();
+    let state = serde_json::to_value(&session.state).unwrap();
+    let revision = (session.revision, session.saved_revision);
+    let history = (session.history.undo.len(), session.history.redo.len());
+    let input = source::resolve(&session, item).unwrap();
+    let info = source::inspect(&input).unwrap();
+    assert_eq!(info["item"], item.0);
+    assert_eq!(info["root_item"], item.0);
+    assert_eq!(info["coordinate_space"], "source");
+    assert_eq!(info["video"]["width"], 8);
+    assert_eq!(info["video"]["height"], 4);
+    assert_eq!(serde_json::to_value(&*session.project).unwrap(), project);
+    assert_eq!(serde_json::to_value(&session.state).unwrap(), state);
+    assert_eq!((session.revision, session.saved_revision), revision);
+    assert_eq!((session.history.undo.len(), session.history.redo.len()), history);
+}
+
+#[test]
+fn offline_slate_is_never_analysis_content() {
+    let (mut session, item, host) = analysis_image_session();
+    let ItemKind::Media(clip) = &mut Arc::make_mut(&mut session.project).item_mut(item).unwrap().kind else { panic!() };
+    clip.offline = true;
+    assert!(source::resolve(&session, item).is_err());
+    let ItemKind::Media(clip) = &mut Arc::make_mut(&mut session.project).item_mut(item).unwrap().kind else { panic!() };
+    clip.offline = false;
+    *host.bytes.lock().unwrap() = b"corrupt or unsupported source".to_vec();
+    assert!(source::resolve(&session, item).is_err(), "must reopen raw data instead of cached display source");
+    assert!(source::resolve(&session, ItemId(u64::MAX)).is_err());
+}
+
+#[test]
+fn subclip_analysis_has_root_coordinates() {
+    let (mut session, root, _) = analysis_image_session();
+    let project = Arc::make_mut(&mut session.project);
+    let parent =
+        project.add_item("parent", Label::Iris, ItemKind::Subclip { parent: root, range: TimeRange::new(Tick(10), Tick(100)), restrict_trims: true }, None);
+    let child = project.add_item("child", Label::Iris, ItemKind::Subclip { parent, range: TimeRange::new(Tick(40), Tick(20)), restrict_trims: true }, None);
+    let result = source::resolve(&session, child).unwrap();
+    assert_eq!(result.root_item, root);
+    assert_eq!(result.available, TimeRange::new(Tick(40), Tick(20)));
+    let info = source::inspect(&result).unwrap();
+    assert_eq!(info["source_range"]["start_ticks"], "40");
+    assert_eq!(info["source_range"]["end_ticks"], "60");
+}
+
+#[test]
+fn cyclic_deep_and_invalid_ranges_fail_without_panicking() {
+    let (mut session, root, _) = analysis_image_session();
+    let mut parent = root;
+    for depth in 1..=16 {
+        parent = Arc::make_mut(&mut session.project).add_item(
+            "nested",
+            Label::Iris,
+            ItemKind::Subclip { parent, range: TimeRange::new(Tick::ZERO, Tick(100)), restrict_trims: true },
+            None,
+        );
+        if depth == 15 {
+            assert!(source::resolve(&session, parent).is_ok());
+        }
+        if depth == 16 {
+            assert!(source::resolve(&session, parent).is_err());
+        }
+    }
+    let ItemKind::Subclip { parent: reference, .. } = &mut Arc::make_mut(&mut session.project).item_mut(parent).unwrap().kind else { panic!() };
+    *reference = parent;
+    assert!(source::resolve(&session, parent).is_err());
+    for range in [TimeRange::new(Tick(-1), Tick(1)), TimeRange::new(Tick::ZERO, Tick::ZERO), TimeRange::new(Tick(i64::MAX), Tick(1))] {
+        let id = Arc::make_mut(&mut session.project).add_item("bad range", Label::Iris, ItemKind::Subclip { parent: root, range, restrict_trims: true }, None);
+        assert!(source::resolve(&session, id).is_err());
+    }
+}
+
+#[test]
+fn analysis_snapshot_does_not_read_before_worker_opens_it() {
+    struct DenyReads;
+    impl Services for DenyReads {
+        fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            panic!("capture must not read")
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            panic!("capture must not write")
+        }
+        fn reader(&self, _: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+            panic!("capture must not open a reader")
+        }
+    }
+    let (mut session, item, _) = analysis_image_session();
+    session.services = Arc::new(DenyReads);
+    assert!(source::AnalysisInput::capture(&session, item).is_ok());
+}
+
+#[test]
+fn hosts_without_readers_must_opt_into_bounded_reads() {
+    struct BoundedHost(Vec<u8>);
+    impl Services for BoundedHost {
+        fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            panic!("must use the bounded host contract")
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            panic!("analysis must not write")
+        }
+        fn read_file_bounded(&self, _: &str, cap: u64) -> std::io::Result<Vec<u8>> {
+            assert_eq!(cap, 64 * 1024 * 1024);
+            Ok(self.0.clone())
+        }
+    }
+    struct UnboundedHost;
+    impl Services for UnboundedHost {
+        fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            panic!("unbounded host reads are forbidden")
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            panic!("analysis must not write")
+        }
+    }
+    let (mut session, item, host) = analysis_image_session();
+    session.services = Arc::new(BoundedHost(host.bytes.lock().unwrap().clone()));
+    assert!(source::resolve(&session, item).is_ok());
+    session.services = Arc::new(UnboundedHost);
+    assert!(source::resolve(&session, item).is_err());
+}
+
+#[test]
+fn audio_inspection_reports_audio_without_a_fake_video_stream() {
+    let bytes = filmcraft_media::wav::write_wav16(&[0.0; 480], 1, 48000);
+    let host = Arc::new(AnalysisHost { bytes: Mutex::new(bytes.clone()) });
+    let mut session = Session::new(host);
+    let item = crate::commands::import_bytes(&mut session, "audio.wav", bytes.into(), None).unwrap();
+    let source = source::resolve(&session, item).unwrap();
+    let info = source::inspect(&source).unwrap();
+    assert!(info["video"].is_null());
+    assert_eq!(info["audio_streams"][0]["sample_rate"], 48000);
+    assert_eq!(info["duration_ticks"], "2540160000");
+}
+
+#[test]
+fn still_subclips_use_the_projects_configured_duration() {
+    let (mut session, root, _) = analysis_image_session();
+    let project = Arc::make_mut(&mut session.project);
+    let ItemKind::Media(media) = &mut project.item_mut(root).unwrap().kind else { panic!() };
+    media.info.duration = Tick(10 * filmcraft_time::TICKS_PER_SECOND);
+    let span = TimeRange::new(Tick(6 * filmcraft_time::TICKS_PER_SECOND), Tick(2 * filmcraft_time::TICKS_PER_SECOND));
+    let child = project.add_item("late still subclip", Label::Iris, ItemKind::Subclip { parent: root, range: span, restrict_trims: true }, None);
+    let source = source::resolve(&session, child).unwrap();
+    assert_eq!(source.available, span);
+    let info = source::inspect(&source).unwrap();
+    assert_eq!(info["duration_ticks"], "2540160000000");
+    assert_eq!(info["duration_origin"], "project_still_duration");
+}
+
+#[test]
+fn oversized_whole_files_fail_before_payload_allocation_or_reads() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct HugeReader(AtomicUsize);
+    impl filmcraft_media::ByteReader for HugeReader {
+        fn len(&self) -> u64 {
+            source::MAX_WHOLE_BYTES + 1
+        }
+        fn read_at(&self, _: u64, bytes: &mut [u8]) -> std::io::Result<()> {
+            self.0.fetch_add(bytes.len(), Ordering::SeqCst);
+            bytes.fill(0);
+            Ok(())
+        }
+    }
+    struct HugeHost(Arc<HugeReader>);
+    impl Services for HugeHost {
+        fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            panic!("unbounded read")
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            panic!("write")
+        }
+        fn reader(&self, _: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+            Some(Ok(self.0.clone()))
+        }
+    }
+    let (mut session, item, _) = analysis_image_session();
+    let reader = Arc::new(HugeReader(AtomicUsize::new(0)));
+    session.services = Arc::new(HugeHost(reader.clone()));
+    let error = source::resolve(&session, item).err().unwrap();
+    assert!(matches!(error, crate::EngineError::Analysis(ref e) if e.code == "RESOURCE_LIMIT"));
+    assert!(reader.0.load(Ordering::SeqCst) <= filmcraft_media::reader::HEAD_LEN);
+}

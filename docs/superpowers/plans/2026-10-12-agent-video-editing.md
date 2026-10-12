@@ -100,10 +100,10 @@ AE01 至 AE06 共享接口，默认按顺序实施；采用多执行者时须使
 
 **Interfaces:** `source::resolve(session: &Session, item: ItemId) -> crate::Result<AnalysisSource>`；`AnalysisSource` 保存 `root_item: ItemId, source: SharedSource, available: TimeRange, services: Arc<dyn Services>` 和内容版本所需的源标识；`source::inspect(source: &AnalysisSource) -> crate::Result<Value>`。
 
-- [ ] 写 `unplaced_media_is_inspectable`，导入图片但不加入序列，断言元数据正确且工程、选区、历史、revision 均未变化。写 `offline_slate_is_never_analysis_content`，离线、坏文件和不支持编码均返回错误，无 PNG 结果。
-- [ ] 写 `subclip_analysis_has_root_coordinates`，核对母素材 ID 和源范围；循环引用和超过 16 层的链返回 Err。遵循当前 Project 子片段范围语义，不重复累加已经位于母素材坐标系的偏移。
-- [ ] 运行 `cargo test -p filmcraft-engine media_analysis::tests` 确认失败；使用原片受限 opener 实现 resolve，避免调用会返回 SlateSource 的显示包装。没有流式 reader 的宿主只允许不超过 64 MiB 的整文件读取，超出返回能力错误。
-- [ ] 实现元数据和可用性输出，保持不依赖当前活动序列；重跑测试，执行 `cargo xtask ci`，提交 `AE02: Resolve source media for read-only analysis`。
+- [x] 写 `unplaced_media_is_inspectable`，导入图片但不加入序列，断言元数据正确且工程、选区、历史、revision 均未变化。写 `offline_slate_is_never_analysis_content`，离线、坏文件和不支持编码均返回错误，无 PNG 结果。
+- [x] 写 `subclip_analysis_has_root_coordinates`，核对母素材 ID 和源范围；循环引用和超过 16 层的链返回 Err。遵循当前 Project 子片段范围语义，不重复累加已经位于母素材坐标系的偏移。
+- [x] 运行 `cargo test -p filmcraft-engine media_analysis::tests` 确认失败；使用原片受限 opener 实现 resolve，避免调用会返回 SlateSource 的显示包装。没有流式 reader 的宿主只允许不超过 64 MiB 的整文件读取，超出返回能力错误。
+- [x] 实现元数据和可用性输出，保持不依赖当前活动序列；重跑测试，执行 `cargo xtask ci`，提交 `AE02: Resolve source media for read-only analysis`。
 
 ## AE03 精确展示时间和图像输出
 

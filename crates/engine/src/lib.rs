@@ -85,6 +85,8 @@ pub enum EngineError {
     Disabled(String, String),
     #[error("invalid parameters for `{cmd}`: {msg}")]
     BadParams { cmd: String, msg: String },
+    #[error("{0}")]
+    Analysis(#[from] media_analysis::AnalysisFailure),
     #[error("no active sequence")]
     NoSequence,
     #[error("edit failed: {0}")]
@@ -100,6 +102,12 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 /// Host services (file access, clipboard…) injected by the frontend.
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
+    /// Read at most `max_bytes` of a whole file, failing before allocating beyond that budget.
+    /// Analysis uses this only without a random-access reader. Hosts must opt in: the default
+    /// `file_size` itself reads the whole file, so it cannot safely enforce this contract.
+    fn read_file_bounded(&self, _path: &str, _max_bytes: u64) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "host does not provide bounded whole-file reads"))
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()>;
     /// Size of a file in bytes (an error when it is missing). Hosts should override this: the
     /// default reads the whole file.
