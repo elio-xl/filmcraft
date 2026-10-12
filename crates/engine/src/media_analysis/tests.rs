@@ -575,6 +575,30 @@ mod frame_output {
         assert_eq!(page["status"], "error");
         assert_eq!(page["errors"][0]["code"], "UNSUPPORTED_MEDIA");
     }
+    #[test]
+    fn response_budget_keeps_complete_frames_and_remaining_times() {
+        let mut noise = Vec::with_capacity(512 * 512 * 4);
+        let mut seed = 37u32;
+        for _ in 0..512 * 512 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            noise.extend_from_slice(&[seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255]);
+        }
+        let images = (0..16).map(|i| Arc::new(VideoFrame::rgba8(512, 512, noise.clone()).with_pts(Tick(i)))).collect();
+        let source = fixture(images, (1, 1), vec![]);
+        let request = parse(&json!({"item":1,"strategy":"timestamps","times_ticks":(0..16).map(|i|i.to_string()).collect::<Vec<_>>()})).unwrap();
+        let page = frames::decode(&source, &request).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= 8 * 1024 * 1024);
+        let images = page["frames"].as_array().unwrap();
+        assert!(!images.is_empty() && images.len() < 16);
+        for image in images {
+            assert_eq!(png(image).dimensions(), (512, 512));
+        }
+        let remaining = page["remaining_times_ticks"].as_array().unwrap();
+        assert_eq!(images.len() + remaining.len(), 16);
+        assert_eq!(page["status"], "partial");
+    }
 }
 
 #[test]
@@ -749,4 +773,145 @@ fn analysis_result_rejects_hostile_job_arguments() {
         assert!(session.execute("media.analysis.result", params).is_err());
     }
     assert!(session.execute("media.analysis.result", json!({"job":1})).is_err());
+}
+
+mod versioned_analysis {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+    use web_time::Instant;
+    fn done(s: &mut Session, job: u64) -> Value {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let value = s.execute("media.analysis.result", json!({"job":job})).unwrap();
+            if value["finished"] == true {
+                return value;
+            }
+            assert!(Instant::now() < until, "analysis did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn frames(s: &mut Session, item: ItemId, extra: Value) -> Value {
+        let mut params = json!({"item":item.0,"max_frames":1});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let job = s.execute("media.analysis.frames", params).unwrap()["job"].as_u64().unwrap();
+        done(s, job)
+    }
+    #[test]
+    fn middle_bytes_change_invalidates_cache_despite_restored_mtime() {
+        let (session, item, host) = analysis_image_session();
+        let mut source = source::resolve(&session, item).unwrap();
+        let dir = crate::temp_dir().join(format!(
+            "filmcraft-analysis-version-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.png");
+        let mut bytes = host.bytes.lock().unwrap().clone();
+        bytes.resize(3 * 1024 * 1024, 0);
+        std::fs::write(&path, &bytes).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        source.services = Arc::new(crate::FsServices);
+        source.identity = source::SourceIdentity::File { path: path.to_str().unwrap().into() };
+        let cancel = AtomicBool::new(false);
+        let first = super::super::cache::source_version(&source, &cancel).unwrap();
+        bytes[1024 * 1024] = 37;
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let second = super::super::cache::source_version(&source, &cancel).unwrap();
+        assert_ne!(first, second);
+        assert!(first.starts_with("sha256:"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn version_mismatch_rejects_request_without_returning_images() {
+        let (mut s, item, _) = analysis_image_session();
+        let page = frames(&mut s, item, json!({"expected_version":"sha256:obsolete"}));
+        assert_eq!(page["status"], "error");
+        assert_eq!(page["error"]["code"], "VERSION_MISMATCH");
+        assert!(page.get("frames").is_none());
+    }
+    #[test]
+    fn identical_content_reuses_cache_and_clear_expires_old_jobs() {
+        let (mut s, item, host) = analysis_image_session();
+        host.bytes.lock().unwrap().resize(3 * 1024 * 1024, 0);
+        let first = frames(&mut s, item, json!({}));
+        let second = frames(&mut s, item, json!({}));
+        assert_eq!(first["cache_hit"], false);
+        assert_eq!(second["cache_hit"], true);
+        assert_eq!(first["source_version"], second["source_version"]);
+        assert_eq!(first["frames"][0]["frame_id"], second["frames"][0]["frame_id"]);
+        assert_ne!(first["job"], second["job"]);
+        println!("3MiB source in memory: first={}, cached={}", first["timings_ms"], second["timings_ms"]);
+        let cleared = s.execute("media.analysis.clearCache", json!({})).unwrap();
+        assert_eq!(cleared["removed"], 1);
+        assert!(matches!(s.execute("media.analysis.result",json!({"job":first["job"]})),Err(crate::EngineError::Analysis(ref e)) if e.code=="RESULT_EXPIRED"));
+    }
+    #[test]
+    fn retry_receipts_reuse_jobs_and_reject_changed_parameters() {
+        let (mut s, item, _) = analysis_image_session();
+        let params = json!({"item":item.0,"max_frames":1,"request_id":"retry-1"});
+        let first = s.execute("media.analysis.frames", params.clone()).unwrap();
+        let second = s.execute("media.analysis.frames", params.clone()).unwrap();
+        assert_eq!(first["job"], second["job"]);
+        done(&mut s, first["job"].as_u64().unwrap());
+        assert!(s.execute("media.analysis.frames", json!({"item":item.0,"max_frames":2,"request_id":"retry-1"})).is_err());
+        s.execute("media.analysis.clearCache", json!({})).unwrap();
+        assert!(matches!(s.execute("media.analysis.frames",params),Err(crate::EngineError::Analysis(ref e)) if e.code=="RESULT_EXPIRED"));
+    }
+    #[test]
+    fn replacement_between_first_hash_and_open_discards_output() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct ChangingHost {
+            first: Vec<u8>,
+            later: Vec<u8>,
+            calls: AtomicUsize,
+        }
+        impl Services for ChangingHost {
+            fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+                panic!("unbounded read")
+            }
+            fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+                panic!("write")
+            }
+            fn reader(&self, _: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+                let bytes = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 { &self.first } else { &self.later };
+                Some(Ok(Arc::new(filmcraft_media::reader::MemReader(bytes.clone().into()))))
+            }
+        }
+        let (mut s, item, host) = analysis_image_session();
+        let mut later = std::io::Cursor::new(Vec::new());
+        image::write_buffer_with_format(&mut later, &[0, 0, 255, 255].repeat(8 * 4), 8, 4, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).unwrap();
+        s.services = Arc::new(ChangingHost { first: host.bytes.lock().unwrap().clone(), later: later.into_inner(), calls: AtomicUsize::new(0) });
+        let page = frames(&mut s, item, json!({}));
+        assert_eq!(page["status"], "error");
+        assert_eq!(page["error"]["code"], "SOURCE_CHANGED");
+        assert!(!page.to_string().contains("png_base64"));
+    }
+    #[test]
+    fn cache_hit_skips_source_open_but_still_rehashes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counted(Arc<AnalysisHost>, AtomicUsize);
+        impl Services for Counted {
+            fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+                panic!("unbounded read")
+            }
+            fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+                panic!("write")
+            }
+            fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                self.0.reader(path)
+            }
+        }
+        let (mut s, item, host) = analysis_image_session();
+        let counted = Arc::new(Counted(host, AtomicUsize::new(0)));
+        s.services = counted.clone();
+        assert_eq!(frames(&mut s, item, json!({}))["cache_hit"], false);
+        assert_eq!(counted.1.load(Ordering::SeqCst), 3, "hash/open/hash");
+        assert_eq!(frames(&mut s, item, json!({}))["cache_hit"], true);
+        assert_eq!(counted.1.load(Ordering::SeqCst), 5, "cache hit must hash twice without decoding the source again");
+    }
 }

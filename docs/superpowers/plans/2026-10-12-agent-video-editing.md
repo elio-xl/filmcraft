@@ -136,12 +136,12 @@ AE01 至 AE06 共享接口，默认按顺序实施；采用多执行者时须使
 
 **Interfaces:** `cache::source_version(source: &AnalysisSource, cancelled: &AtomicBool) -> crate::Result<String>`；`media_analysis::clear_cache(session: &mut Session, params: &Value) -> crate::Result<Value>`。版本采用完整源内容 SHA-256；新增 sha2 0.10，沿用仓库已经使用的依赖系列。生成器按确定性序列化参数哈希，图像序列包含有序文件清单和每帧内容版本。
 
-- [ ] 写 `middle_bytes_change_invalidates_cache`：相同路径、长度、首尾及恢复后的修改时间，中间字节变化仍得到不同版本。写 `version_mismatch_rejects_request`：指定旧 expected_version 时，任务返回冲突，无旧图片。
-- [ ] 写 `response_budget_keeps_complete_frames`：最终 MCP 序列化响应不超过 `8 * 1024 * 1024`；超限时 JSON 和 PNG 均完整，未返回的时间点列入 remaining_times_ticks；单帧超限返回资源错误。
-- [ ] 写 `cache_eviction_keeps_active_results`：清理不删正在消费的结果；重复参数及版本命中同一缓存条目。先运行 `cargo test -p filmcraft-engine media_analysis::tests` 确认失败。
-- [ ] 哈希按 1 MiB 分块读取，检查取消；每次新请求重新验证内容版本，再复用解码结果。生成前后版本不一致时丢弃输出并返回冲突。原有首尾快速指纹只用于候选提示，不能充当精确内容版本。
-- [ ] P0 使用会话内编码结果缓存，默认上限 128 MiB 和 32 个已完成结果，按 LRU 清理未使用条目；关闭会话释放，`clearCache` 返回移除数量。过期 job 读取返回 RESULT_EXPIRED，不能伪装仍在运行。缓存满且无法淘汰时返回预算错误。
-- [ ] 重跑测试并测量哈希与缓存命中耗时；全量哈希的 IO 成本如实记录。运行 `cargo xtask ci`，提交 `AE05: Bound analysis results and validate media versions`。
+- [x] 写 `middle_bytes_change_invalidates_cache`：相同路径、长度、首尾及恢复后的修改时间，中间字节变化仍得到不同版本。写 `version_mismatch_rejects_request`：指定旧 expected_version 时，任务返回冲突，无旧图片。
+- [x] 写 `response_budget_keeps_complete_frames`：引擎图片页为最终 8 MiB 响应预留 256 KiB 元数据空间；最终 MCP 序列化限额在 AE06 适配层验收。超限时 JSON 和 PNG 均完整，未返回的时间点列入 remaining_times_ticks；单帧超限返回资源错误。
+- [x] 写 `cache_eviction_keeps_active_results`：清理不删正在消费的结果；重复参数及版本命中同一缓存条目。先运行 `cargo test -p filmcraft-engine media_analysis::tests` 确认失败。
+- [x] 哈希按 1 MiB 分块读取，检查取消；每次新请求重新验证内容版本，再复用解码结果。生成前后版本不一致时丢弃输出并返回冲突。原有首尾快速指纹只用于候选提示，不能充当精确内容版本。
+- [x] P0 使用会话内编码结果缓存，默认上限 128 MiB 和 32 个已完成结果，按 LRU 清理未使用条目；关闭会话释放，`clearCache` 返回移除数量。过期 job 读取返回 RESULT_EXPIRED，不能伪装仍在运行。缓存满且无法淘汰时返回预算错误。
+- [x] 重跑测试并测量哈希与缓存命中耗时；全量哈希的 IO 成本如实记录。运行 `cargo xtask ci`，提交 `AE05: Bound analysis results and validate media versions`。
 
 ## AE06 MCP 工具和 Bridge 一致性
 

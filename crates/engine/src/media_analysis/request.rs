@@ -13,7 +13,7 @@ const INSPECT_COMMAND: &str = "media.analysis.inspect";
 const COMMON_FIELDS: &[&str] = &["item", "request_id", "expected_version"];
 const FRAME_FIELDS: &[&str] = &["strategy", "start_ticks", "end_ticks", "times_ticks", "max_side", "max_frames"];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AnalysisLimits {
     pub max_side: u32,
     pub max_frames: usize,
@@ -25,13 +25,13 @@ impl Default for AnalysisLimits {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Sampling {
     Uniform { interval: Option<(Tick, Tick)> },
     Timestamps(Vec<Tick>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AnalysisRequest {
     pub item: ItemId,
     pub request_id: Option<String>,
@@ -40,7 +40,7 @@ pub struct AnalysisRequest {
     pub sampling: Sampling,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct InspectRequest {
     pub item: ItemId,
     pub request_id: Option<String>,

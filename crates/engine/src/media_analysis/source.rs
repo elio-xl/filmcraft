@@ -40,8 +40,8 @@ pub struct AnalysisInput {
     name: String,
     interval: Option<TimeRange>,
     still_duration: Option<Tick>,
-    identity: SourceIdentity,
-    services: Arc<dyn Services>,
+    pub(super) identity: SourceIdentity,
+    pub(super) services: Arc<dyn Services>,
     openers: Vec<Opener>,
 }
 
@@ -53,7 +53,7 @@ pub(crate) fn check_cancelled() -> Result<()> {
     if filmcraft_media::cancel::cancelled() { Err(failure("CANCELLED", "analysis was cancelled", false)) } else { Ok(()) }
 }
 
-fn io_failure(error: std::io::Error) -> EngineError {
+pub(crate) fn io_failure(error: std::io::Error) -> EngineError {
     let (code, retryable) = match error.kind() {
         std::io::ErrorKind::NotFound => ("MEDIA_OFFLINE", false),
         std::io::ErrorKind::Unsupported => ("CAPABILITY_UNAVAILABLE", false),
@@ -143,6 +143,14 @@ impl AnalysisInput {
             services: session.services.clone(),
             openers: session.media.openers.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
         })
+    }
+
+    /// Interpretation context independent of mutable file metadata. Used only as an internal
+    /// session-cache key after a complete content hash has verified the source bytes.
+    pub(super) fn cache_context(&self) -> Value {
+        json!({"item":self.item,"root_item":self.root_item,"name":self.name,"interval":self.interval,
+            "still_duration":self.still_duration,"identity":self.identity,
+            "openers":self.openers.iter().map(|opener|*opener as usize).collect::<Vec<_>>()})
     }
 
     /// Run on the analysis worker, after releasing the live Session lock.

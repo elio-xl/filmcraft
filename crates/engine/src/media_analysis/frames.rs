@@ -89,6 +89,8 @@ pub fn decode(source: &AnalysisSource, request: &AnalysisRequest) -> Result<Valu
     let times = sample_times(request, source.available)?;
     let mut frames = BTreeMap::<filmcraft_time::Tick, Value>::new();
     let mut errors = Vec::new();
+    let mut remaining = Vec::new();
+    let mut image_bytes = 0usize;
     let par = source.source.info().video.as_ref().map_or((1, 1), |v| v.par);
     for (index, time) in times.iter().enumerate() {
         check_cancelled()?;
@@ -99,7 +101,19 @@ pub fn decode(source: &AnalysisSource, request: &AnalysisRequest) -> Result<Valu
             }
             let value = match frames.entry(frame.pts) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => entry.insert(encode(&frame, par, request.limits.max_side)?),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let value = encode(&frame, par, request.limits.max_side)?;
+                    let bytes = super::cache::serialized_size(&value)?;
+                    if bytes > super::cache::FRAME_PAGE_BYTES {
+                        return Err(failure("RESOURCE_LIMIT", "a single frame exceeds the response budget; reduce max_side", false));
+                    }
+                    if image_bytes.saturating_add(bytes) > super::cache::FRAME_PAGE_BYTES {
+                        remaining.push(time.0.to_string());
+                        return Ok(());
+                    }
+                    image_bytes = image_bytes.saturating_add(bytes);
+                    entry.insert(value)
+                }
             };
             value["request_indices"].as_array_mut().ok_or_else(|| invalid("missing frame indices"))?.push(json!(index));
             value["requested_ticks"].as_array_mut().ok_or_else(|| invalid("missing requested timestamps"))?.push(json!(time.0.to_string()));
@@ -118,7 +132,7 @@ pub fn decode(source: &AnalysisSource, request: &AnalysisRequest) -> Result<Valu
             );
         }
     }
-    let status = if errors.is_empty() {
+    let status = if errors.is_empty() && remaining.is_empty() {
         "complete"
     } else if frames.is_empty() {
         "error"
@@ -126,5 +140,7 @@ pub fn decode(source: &AnalysisSource, request: &AnalysisRequest) -> Result<Valu
         "partial"
     };
     Ok(json!({"schema_version":1,"status":status,"item":source.item.0,"root_item":source.root_item.0,
-        "coordinate_space":"source","frames":frames.into_values().collect::<Vec<_>>(),"errors":errors}))
+        "coordinate_space":"source","strategy":match request.sampling {super::request::Sampling::Uniform {..}=>"uniform",super::request::Sampling::Timestamps(_)=>"timestamps"},
+        "source_range":{"start_ticks":source.available.start.0.to_string(),"end_ticks":super::source::bounds(source.available)?.1.0.to_string()},
+        "frames":frames.into_values().collect::<Vec<_>>(),"errors":errors,"remaining_times_ticks":remaining}))
 }

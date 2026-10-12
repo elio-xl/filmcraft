@@ -1,5 +1,6 @@
 //! Read-only, bounded analysis of project source media.
 
+pub mod cache;
 pub mod frames;
 pub mod jobs;
 pub mod request;
@@ -17,18 +18,26 @@ pub struct AnalysisFailure {
 #[cfg(test)]
 mod tests;
 
-/// Start read-only source inspection without media I/O on the caller's thread.
-pub fn inspect(session: &mut crate::Session, params: &serde_json::Value) -> crate::Result<serde_json::Value> {
-    let request = request::parse_inspect(params)?;
-    let input = source::AnalysisInput::capture(session, request.item)?;
+/// Start read-only source analysis without media I/O on the caller's thread.
+fn start(session: &mut crate::Session, request: jobs::Request) -> crate::Result<serde_json::Value> {
+    if let Some(reply) = session.analysis.lookup(&request)? {
+        return Ok(reply);
+    }
+    let input = source::AnalysisInput::capture(session, request.item())?;
     let id = session.allocate_job_id()?;
-    session.analysis.submit(id, input, jobs::Request::Inspect(request))
+    session.analysis.submit(id, input, request)
+}
+pub fn inspect(session: &mut crate::Session, params: &serde_json::Value) -> crate::Result<serde_json::Value> {
+    start(session, jobs::Request::Inspect(request::parse_inspect(params)?))
 }
 pub fn frames(session: &mut crate::Session, params: &serde_json::Value) -> crate::Result<serde_json::Value> {
-    let request = request::parse(params)?;
-    let input = source::AnalysisInput::capture(session, request.item)?;
-    let id = session.allocate_job_id()?;
-    session.analysis.submit(id, input, jobs::Request::Frames(request))
+    start(session, jobs::Request::Frames(request::parse(params)?))
+}
+pub fn clear_cache(session: &mut crate::Session, params: &serde_json::Value) -> crate::Result<serde_json::Value> {
+    if params.as_object().is_none_or(|fields| !fields.is_empty()) {
+        return Err(source::failure("INVALID_PARAMS", "clearCache accepts an empty object", false));
+    }
+    Ok(session.analysis.clear_cache())
 }
 pub fn result(session: &crate::Session, params: &serde_json::Value) -> crate::Result<serde_json::Value> {
     let fields = params.as_object().ok_or_else(|| source::failure("INVALID_PARAMS", "expected a job object", false))?;
@@ -45,6 +54,16 @@ pub fn result(session: &crate::Session, params: &serde_json::Value) -> crate::Re
 pub fn commands() -> Vec<crate::CommandSpec> {
     use crate::commands::{CommandSpec, always};
     vec![
+        CommandSpec {
+            id: "media.analysis.clearCache",
+            label: "Clear Unused Analysis Cache",
+            menu: &[],
+            shortcut: None,
+            params: "{}",
+            enabled: always,
+            run: clear_cache,
+            journal: false,
+        },
         CommandSpec {
             id: "media.analysis.inspect",
             label: "Inspect Source Media",
