@@ -169,6 +169,8 @@ engine. Starting a job performs no decoding or hashing on the caller/UI thread.
 | `media.analysis.inspect` | `{item, request_id?, expected_version?}` | `{job, request_id}` |
 | `media.analysis.frames` | `{item, request_id?, expected_version?, strategy?, start_ticks?, end_ticks?, times_ticks?, max_frames?, max_side?}` | `{job, request_id}` |
 | `media.analysis.preview` | `{item, request_id?, expected_version?, start_ticks?, end_ticks?, max_side?, max_fps?, audio?, video_capability?}` | `{job, request_id}`; PNG fallback unless video capability is verified |
+| `media.analysis.summary.set` | `{item, request_id?, source_version, start_ticks, end_ticks, summary, tags, evidence_frame_ids, model_label}` | `{job, request_id}`; grounded model claim in discardable index |
+| `media.analysis.summary.search` | `{request_id?, query, limit?}` | `{job, request_id}`; current-version matches |
 | `media.analysis.transcript` | `{item, request_id?, expected_version?, start_ticks?, end_ticks?}` | `{job, request_id}`; stored words or unavailable |
 | `media.analysis.audio` | `{item, request_id?, expected_version?, start_ticks?, end_ticks?, threshold_db?, min_duration_ticks?}` | `{job, request_id}`; silence and loudness |
 | `media.analysis.shots` | `{item, request_id?, expected_version?, start_ticks?, end_ticks?, sensitivity?, min_shot_frames?}` | `{job, request_id}`; read-only shot candidates |

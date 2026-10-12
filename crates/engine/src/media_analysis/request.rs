@@ -59,7 +59,7 @@ pub(super) fn object<'a>(params: &'a Value, cmd: &str, extra: &[&str]) -> Result
     Ok(fields)
 }
 
-fn identifier(fields: &Map<String, Value>, key: &str, max_chars: usize, cmd: &str) -> Result<Option<String>> {
+pub(super) fn identifier(fields: &Map<String, Value>, key: &str, max_chars: usize, cmd: &str) -> Result<Option<String>> {
     let Some(value) = fields.get(key) else { return Ok(None) };
     let text = value.as_str().ok_or_else(|| bad(cmd, "identifiers must be nonempty strings"))?;
     if text.is_empty() || text.len() > max_chars.saturating_mul(4) || text.chars().count() > max_chars || text.chars().any(char::is_control) {

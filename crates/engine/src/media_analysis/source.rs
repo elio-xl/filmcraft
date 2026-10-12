@@ -295,6 +295,7 @@ pub fn inspect(source: &AnalysisSource) -> Result<Value> {
         "analysis_capabilities":{
             "inspect":{"supported":true},
             "transcript_query":{"supported":true,"requires_whisper":false},
+            "summary_index":{"supported":true,"origin":"model","requires_retained_frame_evidence":true},
             "audio_analysis":{"supported":info.has_audio(),"rhythm":"unavailable"},
             "shots":{"supported":preview_support,"candidate_only":true,"sampling":"source_nominal_frame_grid"},
             "frames":{"supported":frame_support.is_ok(),"reason":frame_support.err().map(|error|error.to_string())},

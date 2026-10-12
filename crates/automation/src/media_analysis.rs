@@ -21,6 +21,8 @@ pub(crate) fn ensure_request_id(command: &str, params: &mut Value) {
             | "media.analysis.shots"
             | "media.analysis.transcript"
             | "media.analysis.audio"
+            | "media.analysis.summary.set"
+            | "media.analysis.summary.search"
     ) {
         return;
     }

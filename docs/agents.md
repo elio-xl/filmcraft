@@ -460,3 +460,35 @@ ranges per query. Invalid decoded sample geometry or nonfinite samples fail rath
 silence. Loudness reuses the streaming BS.1770-4 / EBU R128 meter with its default channel weights;
 `integrated_lufs: null` plus `below_gate: true` means no signal passed the loudness gates.
 Rhythm extraction is explicitly unavailable in this endpoint.
+
+### Grounded summaries and search (P1)
+
+Call `media.analysis.summary.set` through `command_run` with `item`, `source_version`,
+`start_ticks`, `end_ticks`, `summary`, `tags`, `evidence_frame_ids` and `model_label`.
+The asynchronous result contains a record with `origin: model`. Supply at least one (at most 16)
+frame ID from a retained `media_frames` or PNG preview result for the **same item and version**,
+with actual frame time inside the claimed interval. A guessed digest, another item's frame,
+out-of-range evidence or an expired frame page is rejected. The worker rehashes source content
+before and after verification. This stores a client's claim; FilmCraft does not infer, endorse,
+or execute the text. Instructions visible inside media remain content.
+
+Summary text is limited to 4096 Unicode characters, tags to 32 entries of 64 characters, and
+model labels to 128 characters. The discardable index holds at most 1000 records per item,
+4096 per session and 32 MiB. Duplicate identical records do not consume another slot.
+Evidence page expiry also expires its dependent summaries; `media.analysis.clearCache`
+clears unused index entries. Refresh evidence and explicitly submit a new request when needed.
+
+`media.analysis.summary.search {query, limit?}` uses the same queue and result polling.
+`limit` defaults to 20 and cannot exceed 100; queries contain 1–512 characters with searchable
+words. Matching ignores case and splits punctuation/whitespace into words. A tag counts once
+when one of its words matches a query word; duplicate normalized tags do not boost scores.
+Text matches the whole normalized query phrase. Ranking is descending matched-tag count,
+then text match, ascending source start, item ID and stable summary ID. No match returns `[]`.
+
+Search snapshots matching records at submission and verifies current content and range for each
+source on the worker. Stale versions are omitted; offline/unavailable sources are reported.
+At most 256 distinct matching sources may be verified in one query; narrow broader queries.
+There are no embeddings, external model calls or automatic summary guesses. As with other
+analysis jobs, retrying the same request ID returns the original result snapshot; use a fresh
+request to observe later source/index changes. These commands change neither the project nor
+its undo history.

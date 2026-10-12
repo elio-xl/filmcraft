@@ -164,3 +164,15 @@ fn long_audio_reports_unscanned_range() {
     assert_eq!(page["remaining_ranges"][0]["start_ticks"], (600 * TPS).to_string());
     assert_eq!(page["remaining_ranges"][0]["end_ticks"], (601 * TPS).to_string());
 }
+
+#[test]
+fn transcript_retry_keeps_original_receipt_after_item_removal() {
+    let (mut s, item) = session("ok.sound");
+    stored(&mut s, item, "original");
+    let p = json!({"item":item.0,"request_id":"transcript-receipt"});
+    let first = run(&mut s, "media.analysis.transcript", p.clone());
+    s.project = Arc::new(filmcraft_project::Project::new("another project"));
+    let retry = run(&mut s, "media.analysis.transcript", p);
+    assert_eq!(retry["job"], first["job"]);
+    assert_eq!(retry["words"], first["words"]);
+}

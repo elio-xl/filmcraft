@@ -24,6 +24,8 @@ pub enum Request {
     Shots(super::shots::Request),
     Transcript(super::transcripts::Request),
     Audio(super::transcripts::Request),
+    SummarySet(super::summaries::SetRequest),
+    SummarySearch(super::summaries::SearchRequest),
 }
 impl Request {
     fn request_id(&self) -> Option<&str> {
@@ -33,6 +35,8 @@ impl Request {
             Self::Preview(r) => r.request_id.as_deref(),
             Self::Shots(r) => r.request_id.as_deref(),
             Self::Transcript(r) | Self::Audio(r) => r.request_id.as_deref(),
+            Self::SummarySet(r) => r.request_id.as_deref(),
+            Self::SummarySearch(r) => r.request_id.as_deref(),
         }
     }
     fn expected_version(&self) -> Option<&str> {
@@ -42,15 +46,19 @@ impl Request {
             Self::Preview(r) => r.expected_version.as_deref(),
             Self::Shots(r) => r.expected_version.as_deref(),
             Self::Transcript(r) | Self::Audio(r) => r.expected_version.as_deref(),
+            Self::SummarySet(r) => Some(&r.source_version),
+            Self::SummarySearch(_) => None,
         }
     }
-    pub fn item(&self) -> filmcraft_project::ItemId {
+    pub fn item(&self) -> Option<filmcraft_project::ItemId> {
         match self {
-            Self::Inspect(r) => r.item,
-            Self::Frames(r) => r.item,
-            Self::Preview(r) => r.item,
-            Self::Shots(r) => r.item,
-            Self::Transcript(r) | Self::Audio(r) => r.item,
+            Self::Inspect(r) => Some(r.item),
+            Self::Frames(r) => Some(r.item),
+            Self::Preview(r) => Some(r.item),
+            Self::Shots(r) => Some(r.item),
+            Self::Transcript(r) | Self::Audio(r) => Some(r.item),
+            Self::SummarySet(r) => Some(r.item),
+            Self::SummarySearch(_) => None,
         }
     }
     fn canonical(&self, include_version: bool) -> Result<Value> {
@@ -65,7 +73,7 @@ impl Request {
 }
 struct Work {
     id: u64,
-    input: AnalysisInput,
+    input: Option<AnalysisInput>,
     request: Request,
 }
 #[derive(Clone)]
@@ -86,6 +94,8 @@ struct Outcome {
     page: Arc<Page>,
     cache_hit: bool,
     timings: Value,
+    summary: Option<Arc<super::summaries::Record>>,
+    _evidence: Vec<Arc<Page>>,
 }
 #[derive(Default)]
 struct State {
@@ -96,6 +106,7 @@ struct State {
     receipts: BTreeMap<String, (u64, String)>,
     cache: ResultCache,
     artifacts: cache::ArtifactCache,
+    summaries: super::summaries::Index,
 }
 impl State {
     fn available(&self, key: &str) -> bool {
@@ -125,7 +136,7 @@ impl AnalysisQueue {
         let fingerprint = cache::key(&request.canonical(true)?)?;
         receipt(&self.inner.lock().unwrap_or_else(PoisonError::into_inner), request.request_id(), &fingerprint)
     }
-    pub fn submit(&self, id: u64, input: AnalysisInput, request: Request) -> Result<Value> {
+    pub fn submit(&self, id: u64, input: Option<AnalysisInput>, request: Request) -> Result<Value> {
         if cfg!(target_arch = "wasm32") {
             return Err(failure("CAPABILITY_UNAVAILABLE", "media analysis requires a native worker host", false));
         }
@@ -250,11 +261,18 @@ impl AnalysisQueue {
         }
         true
     }
+    pub(super) fn summary_records(&self) -> Vec<Arc<super::summaries::Record>> {
+        let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let State { cache, summaries, .. } = &mut *state;
+        summaries.prune(cache);
+        summaries.records()
+    }
     pub fn clear_cache(&self) -> Value {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let (removed, bytes) = state.cache.clear_unused();
         let (artifacts, video_bytes) = state.artifacts.clear_unused();
-        json!({"removed":removed,"bytes_removed":bytes,"artifacts_removed":artifacts,"video_bytes_removed":video_bytes})
+        let summaries = state.summaries.clear_unused();
+        json!({"removed":removed,"bytes_removed":bytes,"artifacts_removed":artifacts,"video_bytes_removed":video_bytes,"summaries_removed":summaries})
     }
 }
 impl Drop for AnalysisQueue {
@@ -266,15 +284,19 @@ impl Drop for AnalysisQueue {
     }
 }
 fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> Result<Outcome> {
+    if matches!(&work.request, Request::SummarySearch(_)) {
+        return process_search(work, cancel, inner);
+    }
+    let input = work.input.ok_or_else(|| failure("INTERNAL_ERROR", "source analysis is missing its input", false))?;
     let begin = Instant::now();
-    let version = cache::input_version(&work.input, cancel)?;
+    let version = cache::input_version(&input, cancel)?;
     let hash_before = begin.elapsed().as_secs_f64() * 1000.0;
     if work.request.expected_version().is_some_and(|expected| expected != version) {
         return Err(failure("VERSION_MISMATCH", "source content does not match expected_version; inspect again before editing", false));
     }
-    let key = cache::key(&json!({"version":version,"request":work.request.canonical(false)?,"context":work.input.cache_context()}))?;
+    let key = cache::key(&json!({"version":version,"request":work.request.canonical(false)?,"context":input.cache_context()}))?;
     // Stored words may change independently of source content; preserve the submitted snapshot.
-    let key = if matches!(&work.request, Request::Transcript(_)) { format!("transcript-job:{}", work.id) } else { key };
+    let key = if matches!(&work.request, Request::Transcript(_) | Request::SummarySet(_)) { format!("snapshot-job:{}", work.id) } else { key };
     let cached = {
         let mut state = inner.lock().unwrap_or_else(PoisonError::into_inner);
         state.cache.get(&key).and_then(|page| {
@@ -287,7 +309,7 @@ fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> R
     };
     if let Some((page, artifact)) = cached {
         let begin = Instant::now();
-        if cache::input_version(&work.input, cancel)? != version {
+        if cache::input_version(&input, cancel)? != version {
             return Err(failure("SOURCE_CHANGED", "source changed while validating cached output", true));
         }
         return Ok(Outcome {
@@ -295,20 +317,32 @@ fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> R
             key,
             page,
             cache_hit: true,
+            summary: None,
+            _evidence: Vec::new(),
             timings: json!({"hash_before":hash_before,"open":0.0,"decode_or_cache":0.0,"hash_after":begin.elapsed().as_secs_f64()*1000.0}),
         });
     }
     let begin = Instant::now();
-    let source = work.input.open()?;
+    let source = input.open()?;
     let open_ms = begin.elapsed().as_secs_f64() * 1000.0;
     let begin = Instant::now();
     let mut artifact = None;
+    let mut summary = None;
+    let mut evidence = Vec::new();
     let mut value = match &work.request {
         Request::Inspect(_) => super::source::inspect(&source)?,
         Request::Frames(request) => super::frames::decode(&source, request)?,
         Request::Shots(request) => super::shots::analyse(&source, request)?,
         Request::Transcript(request) => super::transcripts::transcript(&source, request)?,
         Request::Audio(request) => super::transcripts::audio(&source, request)?,
+        Request::SummarySet(request) => {
+            let (record, leases) = super::summaries::prepare(&source, request, &mut inner.lock().unwrap_or_else(PoisonError::into_inner).cache)?;
+            let value = json!({"schema_version":1,"status":"complete","summary":record.value()});
+            summary = Some(record);
+            evidence = leases;
+            value
+        }
+        Request::SummarySearch(_) => return Err(failure("INTERNAL_ERROR", "search must use the source inventory worker", false)),
         Request::Preview(request) => {
             let (mut value, bytes) = super::preview::generate(&source, request, cancel.clone())?;
             if let Some(bytes) = bytes {
@@ -345,7 +379,65 @@ fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> R
         key,
         page,
         cache_hit: false,
+        summary,
+        _evidence: evidence,
         timings: json!({"hash_before":hash_before,"open":open_ms,"decode_or_cache":decode_ms,"hash_after":begin.elapsed().as_secs_f64()*1000.0}),
+    })
+}
+
+fn process_search(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> Result<Outcome> {
+    use super::source::{bounds, check_cancelled};
+    let Request::SummarySearch(mut request) = work.request else {
+        return Err(failure("INTERNAL_ERROR", "invalid search work", false));
+    };
+    let begin = Instant::now();
+    let mut leases = BTreeMap::new();
+    let mut retained = Vec::new();
+    {
+        let mut state = inner.lock().unwrap_or_else(PoisonError::into_inner);
+        for record in &request.records {
+            if !record.evidence_pages.iter().all(|key| state.cache.peek(key).is_some()) {
+                continue;
+            }
+            for key in &record.evidence_pages {
+                if let Some(page) = state.cache.get(key) {
+                    leases.insert(key.clone(), page);
+                }
+            }
+            retained.push(record.clone());
+        }
+    }
+    let mut current = Vec::new();
+    for (item, input) in std::mem::take(&mut request.inputs) {
+        check_cancelled()?;
+        let verified: Result<_> = (|| {
+            let version = cache::input_version(&input, cancel)?;
+            let source = input.open()?;
+            let (a, b) = bounds(source.available)?;
+            if cache::source_version(&source, cancel)? != version {
+                return Err(failure("SOURCE_CHANGED", "source changed during search", true));
+            }
+            Ok((version, a, b))
+        })();
+        match verified {
+            Ok((version, a, b)) => current.extend(retained.iter().filter(|r| r.item == item && r.version == version && r.start >= a && r.end <= b).cloned()),
+            Err(error) => {
+                check_cancelled()?;
+                request.unavailable.push(json!({"item":item.0,"reason":error.to_string()}));
+            }
+        }
+    }
+    check_cancelled()?;
+    let results = super::summaries::ranked(&request, current);
+    let value = json!({"schema_version":1,"status":"complete","origin":"model","results":results,"unavailable_sources":request.unavailable});
+    Ok(Outcome {
+        artifact: None,
+        key: format!("summary-search-job:{}", work.id),
+        page: Page::new(value)?,
+        cache_hit: false,
+        timings: json!({"total":begin.elapsed().as_secs_f64()*1000.0}),
+        summary: None,
+        _evidence: leases.into_values().collect(),
     })
 }
 
@@ -380,9 +472,16 @@ fn finish(state: &mut State, id: u64, output: Result<Outcome>) {
         if state.jobs.get(&id).is_some_and(|job| job.cancel.load(Ordering::Relaxed)) {
             return Err(failure("CANCELLED", "analysis was cancelled", false));
         }
+        state.summaries.prune(&state.cache);
+        if let Some(record) = &output.summary {
+            state.summaries.check_capacity(record)?;
+        }
         state.cache.insert(output.key.clone(), output.page.clone())?;
         if let Some((id, data)) = &output.artifact {
             state.artifacts.insert(id.clone(), data.clone())?;
+        }
+        if let Some(record) = &output.summary {
+            state.summaries.insert(record.clone());
         }
         Ok(output)
     });
@@ -436,7 +535,15 @@ mod tests {
         finish(
             &mut queue.inner.lock().unwrap(),
             33,
-            Ok(Outcome { artifact: None, key: "33".into(), page: Page::new(json!({"status":"complete"})).unwrap(), cache_hit: false, timings: Value::Null }),
+            Ok(Outcome {
+                artifact: None,
+                key: "33".into(),
+                page: Page::new(json!({"status":"complete"})).unwrap(),
+                cache_hit: false,
+                timings: Value::Null,
+                summary: None,
+                _evidence: Vec::new(),
+            }),
         );
         let page = queue.result(33).unwrap();
         assert_eq!(page["finished"], true);

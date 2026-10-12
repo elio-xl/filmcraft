@@ -7,6 +7,7 @@ pub mod preview;
 pub mod request;
 pub mod shots;
 pub mod source;
+pub mod summaries;
 pub mod transcripts;
 
 /// Machine-readable failure shared by analysis jobs and per-frame results.
@@ -26,7 +27,7 @@ fn start(session: &mut crate::Session, request: jobs::Request) -> crate::Result<
     if let Some(reply) = session.analysis.lookup(&request)? {
         return Ok(reply);
     }
-    let input = source::AnalysisInput::capture(session, request.item())?;
+    let input = request.item().map(|item| source::AnalysisInput::capture(session, item)).transpose()?;
     let id = session.allocate_job_id()?;
     session.analysis.submit(id, input, request)
 }
@@ -57,6 +58,26 @@ pub fn result(session: &crate::Session, params: &serde_json::Value) -> crate::Re
 pub fn commands() -> Vec<crate::CommandSpec> {
     use crate::commands::{CommandSpec, always};
     vec![
+        CommandSpec {
+            id: "media.analysis.summary.set",
+            label: "Store Grounded Source Summary",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"request_id":str?,"source_version":str,"start_ticks":str,"end_ticks":str,"summary":str,"tags":[str],"evidence_frame_ids":[str],"model_label":str}"#,
+            enabled: always,
+            run: summaries::set,
+            journal: false,
+        },
+        CommandSpec {
+            id: "media.analysis.summary.search",
+            label: "Search Grounded Source Summaries",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"request_id":str?,"query":str,"limit":1..100?}"#,
+            enabled: always,
+            run: summaries::search,
+            journal: false,
+        },
         CommandSpec {
             id: "media.analysis.transcript",
             label: "Read Source Transcript",
@@ -158,3 +179,6 @@ mod shots_tests;
 
 #[cfg(test)]
 mod transcripts_tests;
+
+#[cfg(test)]
+mod summaries_tests;

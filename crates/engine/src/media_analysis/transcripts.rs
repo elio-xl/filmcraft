@@ -61,12 +61,17 @@ fn parse(params: &Value, audio: bool) -> Result<Request> {
     })
 }
 pub fn start(s: &mut Session, p: &Value) -> Result<Value> {
-    let mut request = parse(p, false)?;
-    // Arc snapshot only: no speech inference, serialization or filesystem I/O on the caller.
-    let root = s.project.resolve_media(request.item).map(|(root, _, _)| root).ok_or_else(|| failure("INVALID_SOURCE", "no such source item", false))?;
-    request.transcript = s.project.transcripts.get(&root).cloned();
-    request.generate_unavailable = crate::transcript::can_transcribe(s).err();
-    super::start(s, super::jobs::Request::Transcript(request))
+    let mut work = super::jobs::Request::Transcript(parse(p, false)?);
+    if let Some(reply) = s.analysis.lookup(&work)? {
+        return Ok(reply);
+    }
+    if let super::jobs::Request::Transcript(request) = &mut work {
+        // Arc snapshot only: no inference or filesystem I/O on the caller.
+        let root = s.project.resolve_media(request.item).map(|(root, _, _)| root).ok_or_else(|| failure("INVALID_SOURCE", "no such source item", false))?;
+        request.transcript = s.project.transcripts.get(&root).cloned();
+        request.generate_unavailable = crate::transcript::can_transcribe(s).err();
+    }
+    super::start(s, work)
 }
 pub fn start_audio(s: &mut Session, p: &Value) -> Result<Value> {
     super::start(s, super::jobs::Request::Audio(parse(p, true)?))

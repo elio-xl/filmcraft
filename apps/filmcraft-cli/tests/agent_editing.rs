@@ -74,6 +74,18 @@ impl Mcp {
         assert_ne!(reply["isError"], true, "{reply}");
         reply
     }
+    fn analysis(&mut self, id: &str, params: Value) -> Value {
+        let ack = self.run(id, params);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let page = metadata(&self.good("media_analysis_result", json!({"job":ack["job"]})));
+            if page["finished"] == true {
+                return page;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     fn run(&mut self, id: &str, params: Value) -> Value {
         metadata(&self.good("command_run", json!({"id":id,"params":params})))
     }
@@ -431,6 +443,13 @@ fn source_preview_video_and_png_fallback_round_trip() {
         assert!((2 * TPS..6 * TPS).contains(&time));
     }
     let png_ms = started.elapsed().as_millis();
+    let claim=client.analysis("media.analysis.summary.set",json!({"item":item,"source_version":meta["source_version"],"start_ticks":(2*TPS).to_string(),"end_ticks":(4*TPS).to_string(),"summary":"red circle with source frame labels","tags":["red","circle"],"evidence_frame_ids":[frames[0]["frame_id"]],"model_label":"acceptance client"}));
+    assert_eq!(claim["summary"]["origin"], "model");
+    let search = client.analysis("media.analysis.summary.search", json!({"query":"RED circle"}));
+    assert_eq!(search["results"].as_array().unwrap().len(), 1);
+    assert_eq!(search["results"][0]["evidence_frame_ids"][0], frames[0]["frame_id"]);
+    assert_eq!(search["results"][0]["model_label"], "acceptance client");
+
     let shots =
         metadata(&client.good(
             "media_shots",

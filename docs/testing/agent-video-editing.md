@@ -224,3 +224,17 @@ verified**. No weights are downloaded. With locally installed weights and speech
 existing opt-in qualification is `cargo test -p filmcraft-speech --features whisper --test
 whisper_model -- --nocapture`, using `FILMCRAFT_MODELS_DIR` when needed; a SKIPPED message is not a
 recognition pass.
+
+## P1 AP04 grounded summary qualification
+
+`summaries_tests` rejects stale versions, source intervals outside the media, invented frame IDs,
+wrong-item evidence and expired pages. It verifies that instruction-like summary text is stored
+verbatim without file writes or project edits, replaced source content disappears from fresh
+searches, ranking is deterministic, unknown/oversized parameters fail, the 1001st retained record
+for one item is rejected, and a search returns at most 100 records. Evidence is refreshed during
+the capacity test so cache expiry cannot accidentally bypass the per-item cap.
+
+The actual CLI preview scenario stores a red-circle claim using a returned PNG frame ID, searches
+for it, and checks model provenance and evidence identity while preserving document/history.
+The label `acceptance client` denotes a deterministic test claim, not semantic accuracy measured
+against a model.

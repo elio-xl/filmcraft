@@ -181,6 +181,39 @@ impl ResultCache {
         self.pages.insert(key, page);
         Ok(())
     }
+    /// Only retained, server-produced frames can ground model claims. A plausible digest is not proof.
+    pub fn evidence(
+        &mut self,
+        item: filmcraft_project::ItemId,
+        version: &str,
+        range: (filmcraft_time::Tick, filmcraft_time::Tick),
+        ids: &[String],
+    ) -> Result<(Vec<String>, Vec<Arc<Page>>)> {
+        let mut selected = BTreeMap::new();
+        for id in ids {
+            let key = self
+                .pages
+                .iter()
+                .find_map(|(key, page)| {
+                    if page.value["item"].as_u64() != Some(item.0) || page.value["source_version"].as_str() != Some(version) {
+                        return None;
+                    }
+                    let found = page.value.get("frames").and_then(Value::as_array).is_some_and(|frames| {
+                        frames.iter().any(|frame| {
+                            frame["frame_id"].as_str() == Some(id.as_str())
+                                && frame["actual_ticks"].as_str().and_then(|t| t.parse::<i64>().ok()).is_some_and(|t| t >= range.0.0 && t < range.1.0)
+                        })
+                    });
+                    found.then(|| key.clone())
+                })
+                .ok_or_else(|| {
+                    failure("INVALID_EVIDENCE", "frame evidence is expired, unknown, outside the range or belongs to another source/version", false)
+                })?;
+            let page = self.get(&key).ok_or_else(|| failure("INVALID_EVIDENCE", "evidence expired", false))?;
+            selected.insert(key, page);
+        }
+        Ok(selected.into_iter().unzip())
+    }
     pub fn clear_unused(&mut self) -> (usize, usize) {
         let before = (self.pages.len(), self.bytes);
         self.pages.retain(|_, page| Arc::strong_count(page) > 1);
