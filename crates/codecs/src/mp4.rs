@@ -423,6 +423,19 @@ struct Mp4Video<'a> {
 }
 
 impl VideoSamples for Mp4Video<'_> {
+    fn presentation_time(&self, pts: i64) -> crate::Result<Option<Tick>> {
+        let track = self.src.file.tracks.get(self.track).ok_or_else(|| CodecError::Container("missing video track".into()))?;
+        let ticks = (i128::from(pts) + i128::from(track.edit_offset))
+            .checked_mul(i128::from(filmcraft_time::TICKS_PER_SECOND))
+            .and_then(|v| {
+                let scale = i128::from(track.timescale);
+                v.checked_div_euclid(scale).and_then(|q| v.checked_rem_euclid(scale).map(|r| q + i128::from(r != 0)))
+            })
+            .and_then(|v| i64::try_from(v).ok())
+            .ok_or_else(|| CodecError::Container("invalid presentation timestamp or timescale".into()))?;
+        Ok(Some(Tick(ticks)))
+    }
+
     fn count(&self) -> usize {
         self.src.file.tracks[self.track].samples.len()
     }
@@ -451,6 +464,29 @@ impl MediaSource for Mp4Source {
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>, MediaError> {
         let f = self.video_at(req.time.max(Tick::ZERO))?;
         Ok(f)
+    }
+
+    fn analysis_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>, MediaError> {
+        let ti = self.vtrack.ok_or(MediaError::NoStream("video"))?;
+        let track = self.file.tracks.get(ti).ok_or(MediaError::NoStream("video"))?;
+        // The demuxer's edit_offset models leading empty edits and one unit-rate media edit.
+        // Other edit programs need a piecewise mapping; never report guessed source times.
+        let mut media_edit = false;
+        for edit in &track.edits {
+            if media_edit || edit.media_rate != 0x10000 || edit.media_time < -1 || edit.segment_duration == 0 || self.file.timescale == 0 {
+                return Err(MediaError::Unsupported("analysis requires a single unit-rate media edit after any leading empty edits".into()));
+            }
+            media_edit = edit.media_time >= 0;
+        }
+        if !track.edits.is_empty() && !media_edit {
+            return Err(MediaError::Unsupported("edit list presents no video media".into()));
+        }
+        if req.time.0 < 0 || track.timescale == 0 {
+            return Err(MediaError::Decode("invalid analysis time or timescale".into()));
+        }
+        let target = i128::from(req.time.0) * i128::from(track.timescale) / i128::from(filmcraft_time::TICKS_PER_SECOND);
+        let target = i64::try_from(target).map_err(|_| MediaError::Decode("analysis time overflows".into()))?;
+        Ok(self.video.frame(&Mp4Video { src: self, track: ti }, target)?)
     }
 
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer, MediaError> {
@@ -761,6 +797,48 @@ mod tests {
             mux.write_sample(t, WriteSample { data: &data, duration: 1, composition_offset: 0, is_sync: true }).expect("sample");
         }
         mux.finish().expect("finish").into_inner().into()
+    }
+
+    #[test]
+    fn analysis_actual_pts_include_edits_and_floor_lookup() {
+        use filmcraft_isobmff::Edit;
+        let ms = filmcraft_time::TICKS_PER_SECOND / 1000;
+        for edits in [vec![], vec![Edit { segment_duration: 120, media_time: 1, media_rate: 0x10000 }]] {
+            let src = Mp4Source::open("pts.mov", mov_with_edits(edits)).unwrap();
+            assert_eq!(src.analysis_frame(FrameRequest::full(Tick(70 * ms))).unwrap().pts, Tick(40 * ms));
+            assert_eq!(src.analysis_frame(FrameRequest::full(Tick(40 * ms - 1))).unwrap().pts, Tick::ZERO);
+        }
+        let src = Mp4Source::open(
+            "delayed.mov",
+            mov_with_edits(vec![
+                Edit { segment_duration: 40, media_time: -1, media_rate: 0x10000 },
+                Edit { segment_duration: 160, media_time: 0, media_rate: 0x10000 },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(src.analysis_frame(FrameRequest::full(Tick(70 * ms))).unwrap().pts, Tick(40 * ms));
+    }
+
+    #[test]
+    fn analysis_rejects_edits_that_cannot_be_represented_by_one_offset() {
+        use filmcraft_isobmff::Edit;
+        for edits in [
+            vec![Edit { segment_duration: 160, media_time: 0, media_rate: 0x20000 }],
+            vec![Edit { segment_duration: 80, media_time: 0, media_rate: 0x10000 }, Edit { segment_duration: 80, media_time: 2, media_rate: 0x10000 }],
+            vec![Edit { segment_duration: 80, media_time: 0, media_rate: 0x10000 }, Edit { segment_duration: 80, media_time: -1, media_rate: 0x10000 }],
+        ] {
+            let src = Mp4Source::open("edits.mov", mov_with_edits(edits)).unwrap();
+            assert!(matches!(src.analysis_frame(FrameRequest::full(Tick::ZERO)), Err(MediaError::Unsupported(_))));
+        }
+    }
+
+    #[test]
+    fn analysis_fractional_track_clock_roundtrips_actual_pts() {
+        let mut src = Mp4Source::open("clock.mov", mov_with_edits(vec![])).unwrap();
+        let ti = src.vtrack.unwrap();
+        src.file.tracks[ti].timescale = 30003;
+        let expected = Tick((filmcraft_time::TICKS_PER_SECOND + 30002) / 30003);
+        assert_eq!(src.analysis_frame(FrameRequest::full(expected)).unwrap().pts, expected);
     }
 
     /// A clip lasts as long as its edit list presents it, not as long as its media (`mdhd`) runs.

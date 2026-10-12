@@ -130,6 +130,9 @@ impl ImageSequenceSource {
     /// `frames`: path per frame (`None`: missing). The first present frame is decoded now (size,
     /// alpha); the rest on demand.
     pub fn new(name: &str, frames: Vec<Option<String>>, rate: FrameRate, loader: FrameLoader) -> Result<Self> {
+        if rate.num <= 0 || rate.den <= 0 || frames.len() > 1_000_001 {
+            return Err(MediaError::Decode("invalid sequence rate or excessive frame count".into()));
+        }
         let first = frames.iter().flatten().next().ok_or_else(|| MediaError::Offline(format!("{name}: no frames")))?.clone();
         let bytes = loader(&first).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound { MediaError::Offline(format!("{first}: {e}")) } else { MediaError::Io(format!("{first}: {e}")) }
@@ -160,7 +163,8 @@ impl ImageSequenceSource {
             file_size: None,
         };
         let cache = FrameCache::new(256 << 20);
-        cache.insert(frames.iter().position(Option::is_some).unwrap_or(0), Arc::new(VideoFrame::rgba8(w, h, img.rgba)));
+        let first_index = frames.iter().position(Option::is_some).unwrap_or(0);
+        cache.insert(first_index, Arc::new(VideoFrame::rgba8(w, h, img.rgba).with_pts(rate.tick_of(first_index as i64))));
         Ok(Self { info, frames, loader, cache })
     }
 
@@ -185,7 +189,7 @@ impl ImageSequenceSource {
         let path = self.frames.get(i).and_then(|f| f.as_deref()).ok_or(MediaError::NoStream("video"))?;
         let bytes = (self.loader)(path).map_err(|e| MediaError::Io(format!("{path}: {e}")))?;
         let img = crate::still::decode_raster(path, &bytes)?;
-        let f = Arc::new(VideoFrame::rgba8(img.width, img.height, img.rgba));
+        let f = Arc::new(VideoFrame::rgba8(img.width, img.height, img.rgba).with_pts(self.info.frame_rate().tick_of(i as i64)));
         self.cache.insert(i, f.clone());
         Ok(f)
     }
@@ -209,6 +213,13 @@ impl MediaSource for ImageSequenceSource {
             }
         }
         Err(last_err.unwrap_or(MediaError::NoStream("video")))
+    }
+
+    fn analysis_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>> {
+        if req.time.0 < 0 {
+            return Err(MediaError::Decode("negative analysis time".into()));
+        }
+        self.video_frame(req)
     }
 
     fn audio(&self, _start: i64, _frames: usize, _sample_rate: u32) -> Result<AudioBuffer> {
@@ -282,6 +293,16 @@ mod tests {
                 filmcraft_frame::PixelData::Rgba8(p) => assert_eq!(&p[..], &want[..]),
                 _ => panic!(),
             }
+        }
+    }
+
+    #[test]
+    fn analysis_sequence_reports_selected_frame_time_including_gaps() {
+        let loader: FrameLoader = Arc::new(|_| Ok(png(8, 4, 20)));
+        let frames = vec![None, Some("f1.png".into()), None, Some("f3.png".into())];
+        let s = ImageSequenceSource::new("f1.png", frames, FrameRate::FPS_25, loader).unwrap();
+        for (want, actual) in [(0, 1), (1, 1), (2, 1), (3, 3)] {
+            assert_eq!(s.analysis_frame(FrameRequest::full(FrameRate::FPS_25.tick_of(want))).unwrap().pts, FrameRate::FPS_25.tick_of(actual));
         }
     }
 

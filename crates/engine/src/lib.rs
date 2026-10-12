@@ -130,6 +130,10 @@ pub trait Services: Send + Sync {
     fn list_dir(&self, _dir: &str) -> Option<std::io::Result<Vec<String>>> {
         None
     }
+    /// Bounded directory inventory for analysis. Hosts must enforce the cap while reading.
+    fn list_dir_bounded(&self, _dir: &str, _max_entries: usize) -> std::io::Result<Vec<String>> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "bounded directory listing is unavailable"))
+    }
     /// A loader the media pool keeps for reading files later (image sequence frames on demand).
     /// `None`: the frames are read when the sequence is opened.
     fn file_loader(&self) -> Option<filmcraft_media::sequence::FrameLoader> {
@@ -173,6 +177,21 @@ impl Services for FsServices {
     fn list_dir(&self, dir: &str) -> Option<std::io::Result<Vec<String>>> {
         let dir = if dir.is_empty() { "." } else { dir };
         Some(std::fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()))
+    }
+    fn list_dir_bounded(&self, dir: &str, max_entries: usize) -> std::io::Result<Vec<String>> {
+        let dir = if dir.is_empty() { "." } else { dir };
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            if filmcraft_media::cancel::cancelled() {
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "analysis cancelled"));
+            }
+            if names.len() >= max_entries {
+                return Err(std::io::Error::other("directory exceeds analysis inventory budget"));
+            }
+            let name = entry?.file_name().to_str().ok_or_else(|| std::io::Error::other("directory contains non-Unicode file names"))?.to_owned();
+            names.push(name);
+        }
+        Ok(names)
     }
     fn file_loader(&self) -> Option<filmcraft_media::sequence::FrameLoader> {
         Some(std::sync::Arc::new(|p: &str| std::fs::read(p)))

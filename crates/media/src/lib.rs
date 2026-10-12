@@ -156,6 +156,11 @@ impl FrameRequest {
 
 pub trait MediaSource: Send + Sync {
     fn info(&self) -> &MediaInfo;
+    /// A source frame with its verified presentation time in `VideoFrame::pts`.
+    /// Sources must opt in; an informational or requested timestamp is not sufficient.
+    fn analysis_frame(&self, _req: FrameRequest) -> Result<Arc<VideoFrame>> {
+        Err(MediaError::Unsupported("verified source presentation timestamps are unavailable".into()))
+    }
     /// The frame displayed at media time `req.time`.
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>>;
     /// `frames` audio frames starting at sample index `start` (at `sample_rate`, media time).

@@ -111,6 +111,10 @@ impl std::ops::Sub for GopStats {
 
 /// A container's video sample table, in decode (file) order.
 pub trait VideoSamples {
+    /// Verified conversion from the decoder's track timestamp to source presentation ticks.
+    fn presentation_time(&self, _pts: i64) -> crate::Result<Option<filmcraft_time::Tick>> {
+        Ok(None)
+    }
     fn count(&self) -> usize;
     /// Presentation timestamp of sample `i` (track units).
     fn pts(&self, i: usize) -> i64;
@@ -481,7 +485,10 @@ impl GopCache {
 
     /// Colour signalled by the container wins over the bitstream's (YUV frames only); the
     /// container's clean aperture and then its display rotation are applied.
-    fn finish(&self, mut f: VideoFrame) -> VideoFrame {
+    fn finish(&self, s: &dyn VideoSamples, pts: i64, mut f: VideoFrame) -> crate::Result<VideoFrame> {
+        if let Some(time) = s.presentation_time(pts)? {
+            f.pts = time;
+        }
         if let Some(c) = self.explicit_color
             && !matches!(f.data, filmcraft_frame::PixelData::Rgba8(_) | filmcraft_frame::PixelData::RgbaF32(_))
         {
@@ -490,11 +497,11 @@ impl GopCache {
         if let Some(r) = self.crop {
             f = f.cropped(r);
         }
-        if self.rotation != 0 { f.rotated(self.rotation) } else { f }
+        Ok(if self.rotation != 0 { f.rotated(self.rotation) } else { f })
     }
 
-    fn store(&self, st: &mut State, pts: i64, f: VideoFrame, draft: bool) {
-        let f = self.finish(f);
+    fn store(&self, s: &dyn VideoSamples, st: &mut State, pts: i64, f: VideoFrame, draft: bool) -> crate::Result<()> {
+        let f = self.finish(s, pts, f)?;
         st.last_used = Instant::now();
         if draft {
             st.drafts.insert(pts);
@@ -528,15 +535,17 @@ impl GopCache {
             pool.bytes.fetch_sub(before - st.bytes, Ordering::Relaxed);
         }
         pool.trim_frames(&self.shared);
+        Ok(())
     }
 
     /// Store decoder output (in presentation order) and advance `out_max`.
-    fn store_output(&self, st: &mut State, out: Vec<crate::video::DecodedFrame>) {
+    fn store_output(&self, s: &dyn VideoSamples, st: &mut State, out: Vec<crate::video::DecodedFrame>) -> crate::Result<()> {
         count_frames(&out);
         for d in out {
             st.out_max = st.out_max.max(d.pts);
-            self.store(st, d.pts, d.frame, d.draft);
+            self.store(s, st, d.pts, d.frame, d.draft)?;
         }
+        Ok(())
     }
 
     /// The frame presented at `target` (track units, clamped to the stream).
@@ -669,14 +678,14 @@ impl GopCache {
             let out = timed(|| decoder.decode(&data, s.pts(k)))?;
             st.next += 1;
             DECODED.fetch_add(1, Ordering::Relaxed);
-            self.store_output(&mut st, out);
+            self.store_output(s, &mut st, out)?;
             if st.cached(want_pts, draft).is_some() {
                 break;
             }
         }
         if st.cached(want_pts, draft).is_none() {
             let out = st.decoder.as_mut().map(|d| timed(|| d.flush())).unwrap_or_default();
-            self.store_output(&mut st, out);
+            self.store_output(s, &mut st, out)?;
             st.next = usize::MAX;
         }
         // nearest decoded frame at or before the wanted pts (robust to decoder pts quirks)
@@ -689,13 +698,8 @@ impl GopCache {
         let mut d = s.make_decoder()?;
         let mut next = usize::MAX;
         let out = Self::decode_to(s, d.as_mut(), &mut next, i, want_pts, n)?;
-        let f = out
-            .into_iter()
-            .filter(|p| p.pts <= want_pts)
-            .max_by_key(|p| p.pts)
-            .map(|p| p.frame)
-            .ok_or_else(|| CodecError::Decode("frame not produced".into()))?;
-        Ok(Arc::new(self.finish(f)))
+        let f = out.into_iter().filter(|p| p.pts <= want_pts).max_by_key(|p| p.pts).ok_or_else(|| CodecError::Decode("frame not produced".into()))?;
+        Ok(Arc::new(self.finish(s, f.pts, f.frame)?))
     }
 
     /// Decode with `d` (positioned at `next`) until the picture with `want_pts` (sample `i`) comes out.
@@ -768,7 +772,7 @@ impl GopCache {
         let res = res?;
         count_frames(&res);
         for d in res {
-            self.store(&mut st, d.pts, d.frame, d.draft);
+            self.store(s, &mut st, d.pts, d.frame, d.draft)?;
         }
         st.at_or_before(want_pts, true).ok_or_else(|| CodecError::Decode("frame not produced".into()))
     }
@@ -884,6 +888,39 @@ mod tests {
             filmcraft_frame::PixelData::Rgba8(d) => d[0] as usize | (d[1] as usize) << 8,
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn analysis_pts_survive_decode_order_reordering_and_private_frames() {
+        struct Reordered(Samples);
+        impl VideoSamples for Reordered {
+            fn count(&self) -> usize {
+                3
+            }
+            fn pts(&self, i: usize) -> i64 {
+                [100, 200, 140][i]
+            }
+            fn sample_at(&self, t: i64) -> Option<usize> {
+                (0..3).filter(|&i| self.pts(i) <= t + 100).max_by_key(|&i| self.pts(i))
+            }
+            fn sync_before(&self, _: usize) -> usize {
+                0
+            }
+            fn read(&self, i: usize) -> crate::Result<Vec<u8>> {
+                self.0.read(i)
+            }
+            fn make_decoder(&self) -> crate::Result<Box<dyn VideoDecoder>> {
+                self.0.make_decoder()
+            }
+            fn presentation_time(&self, pts: i64) -> crate::Result<Option<filmcraft_time::Tick>> {
+                Ok(Some(filmcraft_time::Tick((pts - 100) * (filmcraft_time::TICKS_PER_SECOND / 1000))))
+            }
+        }
+        let s = Reordered(samples(3, 3, 3, false));
+        let c = GopCache::new(None);
+        let expected = filmcraft_time::Tick(40 * (filmcraft_time::TICKS_PER_SECOND / 1000));
+        assert_eq!(c.frame(&s, 70).unwrap().pts, expected);
+        assert_eq!(c.private_frame(&s, 2, 140, 3).unwrap().pts, expected);
     }
 
     #[test]

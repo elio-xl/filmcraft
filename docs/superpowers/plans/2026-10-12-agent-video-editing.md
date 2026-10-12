@@ -111,11 +111,11 @@ AE01 至 AE06 共享接口，默认按顺序实施；采用多执行者时须使
 
 **Interfaces:** 在 `MediaSource` 增加默认返回 Unsupported 的 `analysis_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>>`。仅确认 PTS 正确的实现覆盖它，返回帧的 `pts` 是实际源展示时间。`frames::decode(source: &AnalysisSource, request: &AnalysisRequest) -> crate::Result<Value>` 输出共同契约的帧页。
 
-- [ ] 写 `analysis_uses_presentation_time`：使用展示时间为 0、40、100 毫秒的夹具，在 70 毫秒请求命中 40 毫秒帧；另测非零起始 PTS 和 B 帧重排。断言 `actual_ticks != requested_ticks`，不能用请求值回填。
-- [ ] 写 `analysis_preserves_display_geometry`：旋转 90 度的 1920×1080 输入返回 288×512；非方形像素按显示比例缩放；小图不放大、PNG 保留透明度。写 `duplicate_requests_keep_all_indices`，多个请求命中同一 PTS 时只返回一个图像并保留所有请求序号。
-- [ ] 先运行相关 media、codecs 和 engine 测试确认失败；实现首版静态 PNG/JPEG、图像序列和 MP4/MOV 已支持解码路径的分析方法。使用容器展示时间和 edit offset；其他格式显式 Unsupported，不谎报零时间。生成器在测试适配器中实现可预测的展示时间。
-- [ ] 将 engine 的 image PNG 依赖从 dev-dependencies 移入 dependencies，增加与 automation 一致的 base64 0.22。逐帧处理，长边最大 1920，编码前校验像素与缓冲区长度；保留帧 PTS，按 PTS 去重而非像素内容去重。
-- [ ] 运行 `cargo test -p filmcraft-media analysis_`、`cargo test -p filmcraft-codecs analysis_`、`cargo test -p filmcraft-engine media_analysis::tests`，检查筛选出的测试确实运行；再运行 `cargo xtask ci`，提交 `AE03: Return timestamped source thumbnails`。
+- [x] 写 `analysis_uses_presentation_time`：使用展示时间为 0、40、100 毫秒的夹具，在 70 毫秒请求命中 40 毫秒帧；另测非零起始 PTS 和 B 帧重排。断言 `actual_ticks != requested_ticks`，不能用请求值回填。
+- [x] 写 `analysis_preserves_display_geometry`：旋转 90 度的 1920×1080 输入返回 288×512；非方形像素按显示比例缩放；小图不放大、PNG 保留透明度。写 `duplicate_requests_keep_all_indices`，多个请求命中同一 PTS 时只返回一个图像并保留所有请求序号。
+- [x] 先运行相关 media、codecs 和 engine 测试确认失败；实现首版静态 PNG/JPEG、图像序列和 MP4/MOV 已支持解码路径的分析方法。使用容器展示时间和 edit offset；其他格式显式 Unsupported，不谎报零时间。生成器在测试适配器中实现可预测的展示时间。
+- [x] 将 engine 的 image PNG 依赖从 dev-dependencies 移入 dependencies，增加与 automation 一致的 base64 0.22。逐帧处理，长边最大 1920，编码前校验像素与缓冲区长度；保留帧 PTS，按 PTS 去重而非像素内容去重。
+- [x] 运行 `cargo test -p filmcraft-media analysis_`、`cargo test -p filmcraft-codecs analysis_`、`cargo test -p filmcraft-engine media_analysis::tests`，检查筛选出的测试确实运行；再运行 `cargo xtask ci`，提交 `AE03: Return timestamped source thumbnails`。
 
 ## AE04 后台队列与取消
 

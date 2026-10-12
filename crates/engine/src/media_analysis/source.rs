@@ -17,6 +17,7 @@ const READ_CHUNK: usize = 1024 * 1024;
 #[derive(Clone, Debug, serde::Serialize)]
 pub enum SourceIdentity {
     File { path: String },
+    Sequence { first: String, rate: FrameRate, frames: Vec<Option<String>> },
     Generator { generator: Generator, width: u32, height: u32, rate: FrameRate, duration: Tick },
 }
 
@@ -40,7 +41,6 @@ pub struct AnalysisInput {
     interval: Option<TimeRange>,
     still_duration: Option<Tick>,
     identity: SourceIdentity,
-    image_sequence: bool,
     services: Arc<dyn Services>,
     openers: Vec<Opener>,
 }
@@ -104,7 +104,15 @@ impl AnalysisInput {
                 if path.is_empty() || path.len() > 16384 {
                     return Err(failure("RESOURCE_LIMIT", "source path is empty or too long", false));
                 }
-                SourceIdentity::File { path: path.clone() }
+                if media.info.kind == MediaKind::ImageSequence {
+                    let rate = media.info.frame_rate();
+                    if rate.num <= 0 || rate.den <= 0 {
+                        return Err(failure("INVALID_SOURCE", "invalid sequence frame rate", false));
+                    }
+                    SourceIdentity::Sequence { first: path.clone(), rate, frames: Vec::new() }
+                } else {
+                    SourceIdentity::File { path: path.clone() }
+                }
             }
             MediaRef::Generator(generator) => {
                 // Audio-only generators have no video dimensions; these internal placeholders
@@ -132,21 +140,21 @@ impl AnalysisInput {
             interval,
             still_duration: (media.info.kind == MediaKind::Still).then_some(media.info.duration),
             identity,
-            image_sequence: media.info.kind == MediaKind::ImageSequence,
             services: session.services.clone(),
             openers: session.media.openers.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
         })
     }
 
     /// Run on the analysis worker, after releasing the live Session lock.
-    pub fn open(self) -> Result<AnalysisSource> {
+    pub fn open(mut self) -> Result<AnalysisSource> {
         check_cancelled()?;
-        let source: SharedSource = match &self.identity {
-            SourceIdentity::File { path } => {
-                if self.image_sequence {
-                    return Err(failure("UNSUPPORTED_MEDIA", "image-sequence analysis is not implemented yet", false));
-                }
-                open_file(&*self.services, path, &self.openers)?
+        let source: SharedSource = match &mut self.identity {
+            SourceIdentity::File { path } => open_file(&*self.services, path, &self.openers)?,
+            SourceIdentity::Sequence { first, rate, frames } => {
+                *frames = sequence_inventory(&*self.services, first)?;
+                let services = self.services.clone();
+                let loader = Arc::new(move |path: &str| read_bytes(&*services, path).map_err(std::io::Error::other));
+                Arc::new(filmcraft_media::sequence::ImageSequenceSource::new(&self.name, frames.clone(), *rate, loader).map_err(media_failure)?)
             }
             SourceIdentity::Generator { generator, width, height, rate, duration } => {
                 Arc::new(filmcraft_media::generators::GeneratorSource::new(generator.clone(), *width, *height, *rate, *duration).with_name(&self.name))
@@ -176,6 +184,26 @@ impl AnalysisInput {
             identity: self.identity,
         })
     }
+}
+
+/// Inventory is capped before allocating a sparse sequence; hosts must opt into bounded listing.
+pub(crate) fn sequence_inventory(services: &dyn Services, path: &str) -> Result<Vec<Option<String>>> {
+    use filmcraft_media::sequence::{Numbered, sequence_frames};
+    const CAP: usize = 100_000;
+    let first = Numbered::parse(path).ok_or_else(|| failure("UNSUPPORTED_MEDIA", "source is not a numbered image sequence", false))?;
+    let dir = first.dir.trim_end_matches(['/', '\\']);
+    // Preserve a filesystem root rather than turning / into the current directory.
+    let dir = if dir.is_empty() && first.dir.starts_with('/') { "/" } else { dir };
+    let siblings = services.list_dir_bounded(dir, CAP).map_err(io_failure)?;
+    if siblings.len() > CAP || siblings.iter().any(|n| n.len() > 1024 || n.contains(['/', '\\'])) {
+        return Err(failure("RESOURCE_LIMIT", "directory inventory exceeds the analysis budget", false));
+    }
+    let last = siblings.iter().filter_map(|n| first.number_of(n)).max().unwrap_or(first.number);
+    if last.saturating_sub(first.number) >= CAP as u64 {
+        return Err(failure("RESOURCE_LIMIT", "sequence span exceeds 100000 frames", false));
+    }
+    check_cancelled()?;
+    Ok(sequence_frames(&first, &siblings))
 }
 
 fn read_reader(reader: &SharedReader, cap: u64) -> Result<Vec<u8>> {

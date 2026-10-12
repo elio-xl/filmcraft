@@ -43,7 +43,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 web-time = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
 
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png"] }

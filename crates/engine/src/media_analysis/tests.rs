@@ -409,3 +409,201 @@ fn oversized_whole_files_fail_before_payload_allocation_or_reads() {
     assert!(matches!(error, crate::EngineError::Analysis(ref e) if e.code == "RESOURCE_LIMIT"));
     assert!(reader.0.load(Ordering::SeqCst) <= filmcraft_media::reader::HEAD_LEN);
 }
+
+mod frame_output {
+    use super::super::frames;
+    use super::*;
+    use base64::Engine;
+    use filmcraft_frame::{PixelData, VideoFrame};
+    use filmcraft_media::{FrameRequest, MediaError, MediaInfo, MediaKind, MediaSource};
+
+    struct TimedSource {
+        info: MediaInfo,
+        frames: Vec<Arc<VideoFrame>>,
+        fail_at: Vec<Tick>,
+    }
+    impl MediaSource for TimedSource {
+        fn info(&self) -> &MediaInfo {
+            &self.info
+        }
+        fn video_frame(&self, _: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+            panic!("must use the verified analysis method")
+        }
+        fn analysis_frame(&self, request: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+            if self.fail_at.contains(&request.time) {
+                return Err(MediaError::Decode("injected frame failure".into()));
+            }
+            self.frames
+                .iter()
+                .filter(|f| f.pts <= request.time)
+                .max_by_key(|f| f.pts)
+                .cloned()
+                .ok_or_else(|| MediaError::Decode("no source frame at this time".into()))
+        }
+        fn audio(&self, _: i64, _: usize, _: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
+            Err(MediaError::NoStream("audio"))
+        }
+    }
+    fn fixture(frames: Vec<Arc<VideoFrame>>, par: (u32, u32), fail_at: Vec<Tick>) -> source::AnalysisSource {
+        let prototype = filmcraft_media::still::StillSource::from_rgba("test.png", 1, 1, vec![0, 0, 0, 255], false, 0);
+        let mut info = prototype.info().clone();
+        info.kind = MediaKind::Movie;
+        info.duration = available().duration;
+        let video = info.video.as_mut().unwrap();
+        video.width = frames[0].width;
+        video.height = frames[0].height;
+        video.par = par;
+        source::AnalysisSource {
+            item: ItemId(1),
+            root_item: ItemId(1),
+            name: "fixture".into(),
+            source: Arc::new(TimedSource { info, frames, fail_at }),
+            source_duration: available().duration,
+            duration_origin: "source",
+            available: available(),
+            services: Arc::new(crate::FsServices),
+            identity: source::SourceIdentity::File { path: "fixture.mov".into() },
+        }
+    }
+    fn frame(w: u32, h: u32, pts: Tick) -> Arc<VideoFrame> {
+        Arc::new(VideoFrame::rgba8(w, h, [255, 0, 0, 127].repeat((w * h) as usize)).with_pts(pts))
+    }
+    fn png(frame: &Value) -> image::RgbaImage {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(frame["png_base64"].as_str().unwrap()).unwrap();
+        image::load_from_memory(&bytes).unwrap().to_rgba8()
+    }
+
+    #[test]
+    fn analysis_uses_presentation_time() {
+        let ms = filmcraft_time::TICKS_PER_SECOND / 1000;
+        let source = fixture(vec![frame(2, 2, Tick(0)), frame(2, 2, Tick(40 * ms)), frame(2, 2, Tick(100 * ms))], (1, 1), vec![]);
+        let request = parse(&json!({"item":1,"strategy":"timestamps","times_ticks":[(70*ms).to_string()]})).unwrap();
+        let page = frames::decode(&source, &request).unwrap();
+        assert_eq!(page["status"], "complete");
+        assert_eq!(page["frames"][0]["actual_ticks"], (40 * ms).to_string());
+        assert_eq!(page["frames"][0]["requested_ticks"], json!([(70 * ms).to_string()]));
+        let source = fixture(vec![frame(2, 2, Tick(50 * ms)), frame(2, 2, Tick(100 * ms))], (1, 1), vec![]);
+        assert_eq!(frames::decode(&source, &request).unwrap()["frames"][0]["actual_ticks"], (50 * ms).to_string());
+    }
+
+    #[test]
+    fn duplicate_requests_keep_all_indices_and_sort_by_actual_pts() {
+        let ms = filmcraft_time::TICKS_PER_SECOND / 1000;
+        let source = fixture(vec![frame(2, 2, Tick(0)), frame(2, 2, Tick(40 * ms)), frame(2, 2, Tick(100 * ms))], (1, 1), vec![]);
+        let request =
+            parse(&json!({"item":1,"strategy":"timestamps","times_ticks":[(70*ms).to_string(),(40*ms).to_string(),(100*ms).to_string(),"0"]})).unwrap();
+        let page = frames::decode(&source, &request).unwrap();
+        let values = page["frames"].as_array().unwrap();
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0]["actual_ticks"], "0");
+        assert_eq!(values[0]["request_indices"], json!([3]));
+        assert_eq!(values[1]["request_indices"], json!([0, 1]));
+        assert_eq!(values[1]["requested_ticks"], json!([(70 * ms).to_string(), (40 * ms).to_string()]));
+        assert_eq!(values[2]["actual_ticks"], (100 * ms).to_string());
+    }
+
+    #[test]
+    fn analysis_preserves_display_geometry_and_alpha() {
+        let landscape = frame(1920, 1080, Tick::ZERO);
+        let portrait = Arc::new(landscape.rotated(1));
+        for (source, expected) in [
+            (fixture(vec![portrait], (1, 1), vec![]), (288, 512)),
+            (fixture(vec![frame(720, 576, Tick::ZERO)], (16, 15), vec![]), (512, 384)),
+            (fixture(vec![frame(8, 4, Tick::ZERO)], (1, 1), vec![]), (8, 4)),
+        ] {
+            let request = parse(&json!({"item":1,"max_frames":1})).unwrap();
+            let page = frames::decode(&source, &request).unwrap();
+            let result = &page["frames"][0];
+            assert_eq!(result["width"], expected.0);
+            assert_eq!(result["height"], expected.1);
+            assert_eq!(result["mime_type"], "image/png");
+            let image = png(result);
+            assert_eq!(image.dimensions(), expected);
+            assert_eq!(image.get_pixel(0, 0).0[3], 127);
+        }
+    }
+
+    #[test]
+    fn analysis_partial_failure_keeps_other_frames() {
+        let source = fixture(vec![frame(2, 2, Tick(0)), frame(2, 2, Tick(100))], (1, 1), vec![Tick(70)]);
+        let request = parse(&json!({"item":1,"strategy":"timestamps","times_ticks":["0","70","100"]})).unwrap();
+        let page = frames::decode(&source, &request).unwrap();
+        assert_eq!(page["status"], "partial");
+        assert_eq!(page["frames"].as_array().unwrap().len(), 2);
+        assert_eq!(page["errors"][0]["request_index"], 1);
+        assert_eq!(page["errors"][0]["code"], "DECODE_FAILED");
+        let request = parse(&json!({"item":1,"strategy":"timestamps","times_ticks":["70"]})).unwrap();
+        let page = frames::decode(&source, &request).unwrap();
+        assert_eq!(page["status"], "error");
+        assert!(page["frames"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn analysis_rejects_malformed_buffers_without_panicking() {
+        for data in [
+            PixelData::Rgba8(Arc::new(vec![0; 3])),
+            PixelData::RgbaF32(Arc::new(vec![f32::NAN; 16])),
+            PixelData::Yuv16 { planes: std::array::from_fn(|_| Arc::new(vec![0; 4])), chroma: filmcraft_frame::Chroma::C444, bits: 0, alpha: None },
+        ] {
+            let f = VideoFrame { width: 2, height: 2, data, color: filmcraft_color::ColorInfo::SRGB_FULL, par: (1, 1), pts: Tick::ZERO };
+            let source = fixture(vec![Arc::new(f)], (1, 1), vec![]);
+            let request = parse(&json!({"item":1,"max_frames":1})).unwrap();
+            let page = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frames::decode(&source, &request))).unwrap().unwrap();
+            assert_eq!(page["status"], "error");
+            assert_eq!(page["errors"][0]["code"], "INVALID_FRAME");
+            assert!(page["frames"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn analysis_does_not_guess_pts_from_unverified_sources() {
+        struct Unverified(MediaInfo);
+        impl MediaSource for Unverified {
+            fn info(&self) -> &MediaInfo {
+                &self.0
+            }
+            fn video_frame(&self, _: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+                panic!("unverified frame must not be consumed")
+            }
+            fn audio(&self, _: i64, _: usize, _: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
+                Err(MediaError::NoStream("audio"))
+            }
+        }
+        let mut source = fixture(vec![frame(2, 2, Tick(0))], (1, 1), vec![]);
+        source.source = Arc::new(Unverified(source.source.info().clone()));
+        let page = frames::decode(&source, &parse(&json!({"item":1,"max_frames":1})).unwrap()).unwrap();
+        assert_eq!(page["status"], "error");
+        assert_eq!(page["errors"][0]["code"], "UNSUPPORTED_MEDIA");
+    }
+}
+
+#[test]
+fn analysis_sequence_opens_bounded_source_without_display_cache() {
+    struct Host(Arc<AnalysisHost>);
+    impl Services for Host {
+        fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            panic!("unbounded read")
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            panic!("write")
+        }
+        fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+            self.0.reader(path)
+        }
+        fn list_dir_bounded(&self, _: &str, _: usize) -> std::io::Result<Vec<String>> {
+            Ok(vec!["s001.png".into(), "s003.png".into()])
+        }
+    }
+    let (mut session, item, host) = analysis_image_session();
+    session.services = Arc::new(Host(host));
+    let ItemKind::Media(media) = &mut Arc::make_mut(&mut session.project).item_mut(item).unwrap().kind else { panic!() };
+    media.info.kind = filmcraft_media::MediaKind::ImageSequence;
+    media.info.video.as_mut().unwrap().frame_rate = filmcraft_time::FrameRate::FPS_25;
+    media.media = filmcraft_project::MediaRef::File { path: "s001.png".into() };
+    let source = source::resolve(&session, item).unwrap();
+    assert_eq!(source.source_duration, filmcraft_time::FrameRate::FPS_25.tick_of(3));
+    let request = parse(&json!({"item":item.0,"strategy":"timestamps","times_ticks":[filmcraft_time::FrameRate::FPS_25.tick_of(1).0.to_string()]})).unwrap();
+    let page = super::frames::decode(&source, &request).unwrap();
+    assert_eq!(page["status"], "complete");
+    assert_eq!(page["frames"][0]["actual_ticks"], "0");
+}

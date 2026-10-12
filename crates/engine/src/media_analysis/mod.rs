@@ -1,5 +1,6 @@
 //! Read-only, bounded analysis of project source media.
 
+pub mod frames;
 pub mod request;
 pub mod source;
 
