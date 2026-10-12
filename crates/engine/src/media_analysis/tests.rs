@@ -798,6 +798,40 @@ mod versioned_analysis {
         done(s, job)
     }
     #[test]
+    fn corrupt_sequence_frame_is_an_error_and_never_a_reusable_success() {
+        let (mut session, item, host) = analysis_image_session();
+        let dir = crate::temp_dir().join(format!(
+            "filmcraft-analysis-corrupt-sequence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = host.bytes.lock().unwrap().clone();
+        std::fs::write(dir.join("f000.png"), &bytes).unwrap();
+        std::fs::write(dir.join("f001.png"), b"present but corrupt").unwrap();
+        std::fs::write(dir.join("f003.png"), &bytes).unwrap();
+        session.services = Arc::new(crate::FsServices);
+        let ItemKind::Media(media) = &mut Arc::make_mut(&mut session.project).item_mut(item).unwrap().kind else { panic!() };
+        media.info.kind = filmcraft_media::MediaKind::ImageSequence;
+        media.info.video.as_mut().unwrap().frame_rate = filmcraft_time::FrameRate::FPS_25;
+        media.media = filmcraft_project::MediaRef::File { path: dir.join("f000.png").to_str().unwrap().into() };
+        let tick = |n| filmcraft_time::FrameRate::FPS_25.tick_of(n).0.to_string();
+        for times in [vec![tick(1)], vec![tick(0), tick(1)], vec![tick(2)]] {
+            for _ in 0..2 {
+                let job = session.execute("media.analysis.frames", json!({"item":item.0,"strategy":"timestamps","times_ticks":times})).unwrap()["job"]
+                    .as_u64()
+                    .unwrap();
+                let page = done(&mut session, job);
+                assert_eq!(page["status"], if times.len() == 2 { "partial" } else { "error" });
+                assert_eq!(page["errors"].as_array().unwrap().len(), 1);
+                assert_eq!(page["frames"].as_array().unwrap().len(), times.len() - 1);
+                assert_eq!(page["cache_hit"], false, "a new request must retry a failed decode");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn middle_bytes_change_invalidates_cache_despite_restored_mtime() {
         let (session, item, host) = analysis_image_session();
         let mut source = source::resolve(&session, item).unwrap();

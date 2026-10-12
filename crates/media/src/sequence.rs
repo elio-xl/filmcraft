@@ -222,7 +222,16 @@ impl MediaSource for ImageSequenceSource {
         if req.time.0 < 0 {
             return Err(MediaError::Decode("negative analysis time".into()));
         }
-        self.video_frame(req)
+        let last = self.frames.len().checked_sub(1).ok_or(MediaError::NoStream("video"))?;
+        let want = self.info.frame_rate().frame_at(req.time).clamp(0, last as i64) as usize;
+        // Missing sequence slots hold a listed source, but a listed file's decoding
+        // failure is evidence the agent needs. Never use the display error fallback.
+        let selected = (0..=want)
+            .rev()
+            .chain(want + 1..self.frames.len())
+            .find(|&i| self.frames.get(i).is_some_and(Option::is_some))
+            .ok_or(MediaError::NoStream("video"))?;
+        self.decode(selected)
     }
 
     fn audio(&self, _start: i64, _frames: usize, _sample_rate: u32) -> Result<AudioBuffer> {

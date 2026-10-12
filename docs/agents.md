@@ -128,7 +128,7 @@ Use `media_import`, then `media_inspect {item}` and `media_frames {item}`. The a
 leave the project, playhead, selection, history and active trims unchanged. `readOnlyHint` refers
 to project and source files: analysis still creates background jobs and an in-memory cache.
 The decoder's `analysis_capabilities.frames` indicates verified presentation-time support;
-an individual corrupt frame can still fail. Short video output is not implemented in P0. MP4/MOV analysis supports unscaled quarter-turn display matrices; mirrors, scales, shear, perspective and complex edit lists are explicitly unsupported.
+an individual corrupt frame can still fail. Short video output is not implemented in P0. MP4/MOV analysis supports unscaled quarter-turn display matrices; mirrors, scales, shear, perspective and complex edit lists are explicitly unsupported. Leading empty edits must sum to an exact number of video-track clock units; fractional offsets are also unsupported. Image sequences hold the nearest earlier listed image for a missing slot (or the first later one); a selected file that fails decoding is an error, never silently replaced.
 
 ```json
 {"item":12,"strategy":"uniform","start_ticks":"0","end_ticks":"2540160000000","max_frames":8,"max_side":512,"wait":true}

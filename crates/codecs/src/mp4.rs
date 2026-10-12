@@ -482,11 +482,27 @@ impl MediaSource for Mp4Source {
         // The demuxer's edit_offset models leading empty edits and one unit-rate media edit.
         // Other edit programs need a piecewise mapping; never report guessed source times.
         let mut media_edit = false;
+        let mut empty_duration = 0i128;
         for edit in &track.edits {
             if media_edit || edit.media_rate != 0x10000 || edit.media_time < -1 || edit.segment_duration == 0 || self.file.timescale == 0 {
                 return Err(MediaError::Unsupported("analysis requires a single unit-rate media edit after any leading empty edits".into()));
             }
             media_edit = edit.media_time >= 0;
+            if !media_edit {
+                empty_duration = empty_duration
+                    .checked_add(i128::from(edit.segment_duration))
+                    .ok_or_else(|| MediaError::Unsupported("analysis edit duration overflows".into()))?;
+            } else {
+                // The demuxer truncates empty edits to track-clock units. Verify its offset
+                // is exact before letting analysis use it for both lookup and actual PTS.
+                let scaled =
+                    empty_duration.checked_mul(i128::from(track.timescale)).ok_or_else(|| MediaError::Unsupported("analysis edit offset overflows".into()))?;
+                let scale = i128::from(self.file.timescale); // nonzero checked above
+                let exact_offset = scaled.checked_div(scale).and_then(|v| v.checked_sub(i128::from(edit.media_time)));
+                if scaled.checked_rem(scale) != Some(0) || exact_offset != Some(i128::from(track.edit_offset)) {
+                    return Err(MediaError::Unsupported("analysis requires an exact integer track-clock edit offset".into()));
+                }
+            }
         }
         if !track.edits.is_empty() && !media_edit {
             return Err(MediaError::Unsupported("edit list presents no video media".into()));
@@ -849,6 +865,37 @@ mod tests {
             let src = Mp4Source::open("edits.mov", mov_with_edits(edits)).unwrap();
             assert!(matches!(src.analysis_frame(FrameRequest::full(Tick::ZERO)), Err(MediaError::Unsupported(_))));
         }
+    }
+
+    #[test]
+    fn analysis_rejects_fractional_edit_offset() {
+        use filmcraft_isobmff::Edit;
+        let src = Mp4Source::open(
+            "half-frame-delay.mov",
+            mov_with_edits(vec![
+                Edit { segment_duration: 20, media_time: -1, media_rate: 0x10000 },
+                Edit { segment_duration: 160, media_time: 0, media_rate: 0x10000 },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(src.file.timescale, 1000);
+        assert_eq!(src.file.tracks[src.vtrack.unwrap()].timescale, 25);
+        assert!(matches!(src.analysis_support(), Err(MediaError::Unsupported(_))));
+        assert!(matches!(src.analysis_frame(FrameRequest::full(Tick(filmcraft_time::TICKS_PER_SECOND / 20))), Err(MediaError::Unsupported(_))));
+        // Two half-frame empty edits sum to a representable offset and remain supported.
+        let aligned = Mp4Source::open(
+            "aligned.mov",
+            mov_with_edits(vec![
+                Edit { segment_duration: 20, media_time: -1, media_rate: 0x10000 },
+                Edit { segment_duration: 20, media_time: -1, media_rate: 0x10000 },
+                Edit { segment_duration: 160, media_time: 0, media_rate: 0x10000 },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            aligned.analysis_frame(FrameRequest::full(Tick(filmcraft_time::TICKS_PER_SECOND / 20))).unwrap().pts,
+            Tick(filmcraft_time::TICKS_PER_SECOND / 25)
+        );
     }
 
     #[test]

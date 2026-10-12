@@ -138,4 +138,27 @@ this is not a stable ranking of cache-hit and cold-request timings.
 
 AE06 full gate: 2,867 passed, 0 failed, 41 existing ignored. AE07 full gate: 2,870 passed, 0 failed, 41
 existing ignored. Both also passed formatting, workspace Clippy, dependency layers, 69 attributed
-assets and 44-crate wasm checks. AE08 also passed the complete gate: 2,872 passed, 0 failed, 41 existing ignored, plus formatting, Clippy, layers, assets and wasm. Final independent review is recorded after completion.
+assets and 44-crate wasm checks. AE08 also passed the complete gate: 2,872 passed, 0 failed, 41 existing ignored, plus formatting, Clippy, layers, assets and wasm. Final independent review and its fixes are recorded below.
+
+## Final review regressions
+
+The independent branch review found two Important issues. The bounded P0 fix rejects leading
+empty edit offsets that do not exactly fit the integer video-track clock, rather than reporting
+an incorrect picture or timestamp. The regression uses a 20 ms delay with a 25 Hz track clock;
+two 20 ms empty edits summing to one 40 ms track unit remain supported.
+
+Image-sequence analysis now chooses the listed source image before decoding it. An intentionally
+missing slot can hold the preceding image, but corruption in that selected image is reported as a
+per-request error. Tests cover an entirely failed page, a partial page retaining a valid image,
+a missing slot whose selected predecessor is corrupt, and a fresh request retrying rather than
+reusing a cached success. Existing missing-slot timestamp tests remain applicable.
+
+One Minor finding remains deferred: source-bound timestamp errors are currently classified as
+`INTERNAL_ERROR` at asynchronous job completion, although their message explains the invalid
+range and the request fails safely. Persistent native Codex registration, blind/human model
+qualification, and the separately planned P1 features are not claimed by this P0 acceptance.
+
+Both regression tests were observed failing before their fixes and passing afterwards. The final
+complete gate passed: 2,874 tests passed, 0 failed, 41 existing ignored; formatting, workspace
+Clippy, dependency layers, 69 attributed assets and the 44-crate Wasm check also passed. No second
+reviewer pass was used; focused RED→GREEN tests and the full gate verify the review fixes.
