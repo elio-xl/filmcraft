@@ -241,7 +241,7 @@ fn param_entry<'a>(e: &'a mut EffectInstance, id: &str) -> Option<&'a mut Param>
 
 /// Set properties `props` on layer `e` (keyframe-aware at media time `mt`). Changing the text
 /// keeps per-character styles on their characters.
-fn apply_props(e: &mut EffectInstance, props: &serde_json::Map<String, Value>, mt: Tick) -> Result<()> {
+pub(crate) fn apply_props(e: &mut EffectInstance, props: &serde_json::Map<String, Value>, mt: Tick) -> Result<()> {
     for (k, v) in props {
         if k == "enabled" {
             e.enabled = v.as_bool().unwrap_or(true);

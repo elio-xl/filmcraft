@@ -309,31 +309,21 @@ pub(crate) fn item_p(p: &Value, k: &str) -> Option<ItemId> {
 /// clip a moved clip lands inside is split in two). With `copy: true` (Option-drag) the clips stay
 /// where they are and copies land at the destinations instead; the copies are selected and listed
 /// as `copied`.
-fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
+pub(crate) fn plan_clip_moves(q: &filmcraft_project::Sequence, listed: &[(ClipId, TrackId, Tick)], follow: bool) -> Result<Vec<(ClipId, TrackId, Tick)>> {
     const CMD: &str = "timeline.move";
-    let mut listed: Vec<(ClipId, TrackId, Tick)> = Vec::new();
-    for m in p.get("moves").and_then(Value::as_array).into_iter().flatten() {
-        let track = track_p(s, m, "track", CMD)?;
-        if let (Some(clip), Some(track), Some(time)) = (clip_p(m, "clip"), track, m.get("time").and_then(Value::as_i64)) {
-            listed.push((clip, track, Tick(time)));
-        }
-    }
-    if listed.is_empty() {
-        return Err(bad(CMD, "need `moves`"));
-    }
-    let follow = bool_p(p, "linked").unwrap_or(s.state.linked_selection);
-    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
     // (clip, destination track, new start, where a partner starts now). `time` is any i64: the
     // sums are done in i128, where a few i64 values cannot overflow, and checked on the way back.
     let mut plan: Vec<(ClipId, TrackId, i128, Option<i128>)> = Vec::new();
-    for &(clip, track, time) in &listed {
+    let listed_ids = listed.iter().map(|m| m.0).collect::<std::collections::BTreeSet<_>>();
+    let mut planned = std::collections::BTreeSet::new();
+    for &(clip, track, time) in listed {
         plan.push((clip, track, i128::from(time.0), None));
         let Some((_, it)) = q.find_item(clip) else { continue }; // `edit::move_items` reports it
         let Some(link) = it.link.filter(|_| follow) else { continue };
         let offset = i128::from(time.0) - i128::from(it.start.0);
         for t in q.all_tracks().filter(|t| !t.locked) {
             for partner in t.items.iter().filter(|i| i.link == Some(link)) {
-                if !listed.iter().any(|m| m.0 == partner.id) && !plan.iter().any(|m| m.0 == partner.id) {
+                if !listed_ids.contains(&partner.id) && planned.insert(partner.id) {
                     plan.push((partner.id, t.id, i128::from(partner.start.0) + offset, Some(i128::from(partner.start.0))));
                 }
             }
@@ -350,6 +340,24 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
         let start = i64::try_from(start + late).ok().map(Tick).filter(|t| *t <= Tick::MAX).ok_or_else(|| bad(CMD, "`time` is out of range"))?;
         moves.push((clip, track, start));
     }
+    Ok(moves)
+}
+
+fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "timeline.move";
+    let mut listed: Vec<(ClipId, TrackId, Tick)> = Vec::new();
+    for m in p.get("moves").and_then(Value::as_array).into_iter().flatten() {
+        let track = track_p(s, m, "track", CMD)?;
+        if let (Some(clip), Some(track), Some(time)) = (clip_p(m, "clip"), track, m.get("time").and_then(Value::as_i64)) {
+            listed.push((clip, track, Tick(time)));
+        }
+    }
+    if listed.is_empty() {
+        return Err(bad(CMD, "need `moves`"));
+    }
+    let follow = bool_p(p, "linked").unwrap_or(s.state.linked_selection);
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let moves = plan_clip_moves(q, &listed, follow)?;
     let ins = bool_p(p, "insert").unwrap_or(false);
     let copy = bool_p(p, "copy").unwrap_or(false);
     // every clip on the sequence now: id -> (track, start, end, project item)
@@ -413,13 +421,19 @@ pub(crate) fn slip_together(q: &mut filmcraft_project::Sequence, ctx: &mut edit:
 
 /// Expand a clip selection with linked partners (when linked selection is on).
 pub fn with_links(s: &Session, clips: &[ClipId]) -> Vec<ClipId> {
-    let Some(seq) = s.active_sequence() else { return clips.to_vec() };
+    let Some(seq) = s.active_sequence() else {
+        return clips.to_vec();
+    };
+    linked_clips(seq, clips, s.state.linked_selection)
+}
+pub(crate) fn linked_clips(seq: &filmcraft_project::Sequence, clips: &[ClipId], linked: bool) -> Vec<ClipId> {
     let mut out = clips.to_vec();
-    if s.state.linked_selection {
-        let links: Vec<u64> = clips.iter().filter_map(|c| seq.find_item(*c).and_then(|(_, i)| i.link)).collect();
+    let mut seen = clips.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    if linked {
+        let links = clips.iter().filter_map(|c| seq.find_item(*c).and_then(|(_, i)| i.link)).collect::<std::collections::BTreeSet<_>>();
         for t in seq.all_tracks() {
             for i in &t.items {
-                if i.link.is_some_and(|l| links.contains(&l)) && !out.contains(&i.id) {
+                if i.link.is_some_and(|l| links.contains(&l)) && seen.insert(i.id) {
                     out.push(i.id);
                 }
             }
@@ -430,7 +444,14 @@ pub fn with_links(s: &Session, clips: &[ClipId]) -> Vec<ClipId> {
 
 /// The delta a trim of `clips` (a clip and its linked partners) can apply together: `delta`
 /// clamped by each one's media and neighbours.
-fn clamp_trim_linked(q: &filmcraft_project::Sequence, clips: &[ClipId], edge: Edge, mode: TrimMode, delta: Tick, ctx: &edit::EditCtx) -> Result<Tick> {
+pub(crate) fn clamp_trim_linked(
+    q: &filmcraft_project::Sequence,
+    clips: &[ClipId],
+    edge: Edge,
+    mode: TrimMode,
+    delta: Tick,
+    ctx: &edit::EditCtx,
+) -> Result<Tick> {
     let mut d = delta;
     for c in clips {
         let x = edit::clamp_trim(q, *c, edge, mode, d, ctx)?;
@@ -1289,11 +1310,13 @@ fn build() -> Vec<CommandSpec> {
             has_seq,
             crate::export_tools::export_media
         ),
-        query!("jobs.list", "List Jobs", "{}", |s, _| Ok(Value::Array(s.jobs.iter().map(crate::Job::to_json).chain(s.analysis.list()).collect()))),
+        query!("jobs.list", "List Jobs", "{}", |s, _| Ok(Value::Array(
+            s.jobs.iter().map(crate::Job::to_json).chain(s.analysis.list()).chain(s.edit_plans.list()).collect()
+        ))),
         query!("perf.stats", "Performance Statistics", "{}", |s, _| Ok(crate::perf::stats(s))),
         query!("jobs.cancel", "Cancel Job", r#"{"job":id}"#, |s, p| {
             let id = u64_p(p, "job").ok_or_else(|| bad("jobs.cancel", "need `job`"))?;
-            if s.analysis.cancel(id) {
+            if s.edit_plans.cancel(id) || s.analysis.cancel(id) {
                 return Ok(Value::Null);
             }
             let j = s.jobs.iter().find(|j| j.id == id).ok_or_else(|| bad("jobs.cancel", "no such job"))?;
@@ -2957,6 +2980,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::media_browser::commands());
     v.extend(crate::paste_media::commands());
     v.extend(crate::media_analysis::commands());
+    v.extend(crate::edit_plan::commands());
     // Edit ▸ Label ▸ <colour>, Paste Attributes, subclips, Video / Audio Options, Replace With Clip…
     // and their menu order
     crate::clip_ops::apply_layout(&mut v);

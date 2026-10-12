@@ -17,6 +17,7 @@ pub mod clip_ops;
 pub mod color;
 pub mod commands;
 pub mod demo;
+pub mod edit_plan;
 pub mod essential_sound;
 pub mod export_tools;
 pub mod graphic_templates;
@@ -386,6 +387,7 @@ pub struct Session {
     /// Background jobs (exports, render previews…).
     pub jobs: Vec<Job>,
     pub analysis: media_analysis::jobs::AnalysisQueue,
+    pub edit_plans: edit_plan::PlanQueue,
     next_job_id: u64,
     /// User preferences (`prefs.*` commands) and where they persist (None = not persisted).
     pub prefs: autosave::Preferences,
@@ -515,6 +517,7 @@ impl Session {
             journal: Vec::new(),
             jobs: Vec::new(),
             analysis: Default::default(),
+            edit_plans: Default::default(),
             next_job_id: 0,
             prefs: Default::default(),
             prefs_path: None,
@@ -1097,6 +1100,9 @@ pub fn media_start(p: &Project, id: ItemId) -> Tick {
 
 /// Media duration of an item (None for stills/adjustment layers = unlimited handles).
 pub fn media_duration(p: &Project, _pool: &MediaPool, id: ItemId) -> Option<Tick> {
+    project_media_duration(p, id)
+}
+pub(crate) fn project_media_duration(p: &Project, id: ItemId) -> Option<Tick> {
     // a subclip's limit is its parent's: follow the chain, bounded (a damaged project file can make
     // it cyclic or arbitrarily deep)
     let mut id = id;

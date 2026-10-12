@@ -219,3 +219,36 @@ resizes the root split; path entries use `false` for the first child and `true` 
 the second. `{"action":{"MoveFloating":{"panel":"Info","rect":[45,65,420,320]}}}`
 repositions and resizes the floating group containing Info. Invalid actions leave the
 layout unchanged. Pointer gestures dispatch through this same catalog command.
+
+### Editing plan preflight (P1)
+
+`edit.plan.validate` starts a bounded read-only worker and returns `{job,request_id}`.
+Poll `edit.plan.result {job}` until `finished`; `jobs.list/cancel` include these jobs.
+Input is `{request_id,expected_revision,source_versions,steps}`: revision is an unsigned
+**decimal string**, source_versions is an array of `{item,source_version}` from source
+analysis, and each step is `{id,params,reason}`. Request IDs are bounded to 128 characters.
+Plans allow 1–100 steps, 1 MiB JSON, depth 32, and 512 characters per reason.
+At most 256 source versions, one running plan and eight queued plans are accepted.
+
+| Exact command | Required explicit targets | Isolated changes |
+| --- | --- | --- |
+| `timeline.trim` | `clip`, `edge`, decimal-string `delta` (nonzero, signed) | Clip trim; regular or ripple; linked-selection and marker policy captured at submission |
+| `timeline.move` | `moves:[{clip,track,time}]`, decimal-string nonnegative time | Move/copy/insert; optional `linked`, `copy`, `insert` booleans |
+| `edit.clear` | `clips:[id]` | Delete clips with captured linked-selection policy |
+| `captions.setText` | `caption` and `text` or `speaker` | Caption text/speaker |
+| `graphics.set` | `clip`, `layer`, decimal-string `time`, `props` | Layer properties, including existing shared-instance synchronization |
+
+All other commands and unknown fields are rejected. No selection/playhead-derived targets,
+`merge`/`begin`, nested commands, file/network operations, export or background job starts
+are permitted. Executors receive only project/editor snapshots; they cannot call host services.
+Affected media (including linked clips) require matching content versions. Hashing/opening
+runs off the Session thread, before and after isolated computation. Unsupported native-worker
+hosts return `CAPABILITY_UNAVAILABLE`.
+
+Success reports `committed:false`, per-step affected clips and a bounded changed-item summary.
+Step errors identify the zero-based step; whole-plan errors include `REVISION_MISMATCH`,
+`VERSION_MISMATCH`, `SOURCE_CHANGED`, `PLAN_BUSY`, `CANCELLED` and resource limits.
+Preflight changes neither the document nor editor state/history/revision and is **not a lock**
+or an authorization token for a later apply. Read-only reports retain the latest 32 results
+(1 MiB each); up to 10,000 request receipts remain for the session, preventing silent replay
+of expired requests. A duplicate ID with different parameters returns `REQUEST_ID_CONFLICT`.

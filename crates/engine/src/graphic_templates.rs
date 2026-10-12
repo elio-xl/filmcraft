@@ -952,10 +952,12 @@ fn upgrade_to_source(s: &mut Session, p: &Value) -> Result<Value> {
 /// After a `graphics.*` command: copy an edited instance of a source graphic to the shared
 /// layers and every other instance (in the same undo step).
 pub fn sync_source_graphics(s: &mut Session) {
-    if s.project.source_graphics.is_empty() {
+    sync_source_graphics_project(Arc::make_mut(&mut s.project));
+}
+pub(crate) fn sync_source_graphics_project(p: &mut filmcraft_project::Project) {
+    if p.source_graphics.is_empty() {
         return;
     }
-    let p = Arc::make_mut(&mut s.project);
     let items: Vec<ItemId> = p.source_graphics.keys().copied().collect();
     for item in items {
         let master = p.source_graphics[&item].clone();

@@ -98,10 +98,10 @@ pub fn source_version(source: &AnalysisSource, cancelled: &AtomicBool) -> Result
     version(&source.identity, &*source.services, cancelled)
 }
 /// Hash before opening the decoder, so an atomic path replacement cannot stamp old pixels with a new version.
-pub(super) fn input_version(input: &AnalysisInput, cancelled: &AtomicBool) -> Result<String> {
+pub(crate) fn input_version(input: &AnalysisInput, cancelled: &AtomicBool) -> Result<String> {
     version(&input.identity, &*input.services, cancelled)
 }
-pub(super) fn key(value: &Value) -> Result<String> {
+pub(crate) fn key(value: &Value) -> Result<String> {
     let bytes = serde_json::to_vec(value).map_err(|e| failure("INTERNAL_ERROR", e.to_string(), false))?;
     Ok(hex(Sha256::digest(bytes)))
 }
