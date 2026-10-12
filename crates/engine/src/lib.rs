@@ -385,6 +385,8 @@ pub struct Session {
     pub journal: Vec<(String, Value)>,
     /// Background jobs (exports, render previews…).
     pub jobs: Vec<Job>,
+    pub analysis: media_analysis::jobs::AnalysisQueue,
+    next_job_id: u64,
     /// User preferences (`prefs.*` commands) and where they persist (None = not persisted).
     pub prefs: autosave::Preferences,
     pub prefs_path: Option<std::path::PathBuf>,
@@ -485,6 +487,14 @@ impl Default for Session {
 }
 
 impl Session {
+    /// Allocate an id shared by legacy jobs and media analysis.
+    pub fn allocate_job_id(&mut self) -> Result<u64> {
+        let previous = self.next_job_id.max(self.jobs.iter().map(|job| job.id).max().unwrap_or(0));
+        let id = previous.checked_add(1).ok_or_else(|| EngineError::Other("job id space exhausted".into()))?;
+        self.next_job_id = id;
+        Ok(id)
+    }
+
     pub fn new(services: Arc<dyn Services>) -> Self {
         Self {
             project: Arc::new(Project::new("Untitled")),
@@ -504,6 +514,8 @@ impl Session {
             events: Vec::new(),
             journal: Vec::new(),
             jobs: Vec::new(),
+            analysis: Default::default(),
+            next_job_id: 0,
             prefs: Default::default(),
             prefs_path: None,
             persistence: None,

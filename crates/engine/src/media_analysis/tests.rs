@@ -607,3 +607,146 @@ fn analysis_sequence_opens_bounded_source_without_display_cache() {
     assert_eq!(page["status"], "complete");
     assert_eq!(page["frames"][0]["actual_ticks"], "0");
 }
+mod queued_analysis {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use web_time::Instant;
+    struct Host {
+        source: Arc<AnalysisHost>,
+        mode: AtomicUsize,
+        entered: AtomicUsize,
+    }
+    impl Services for Host {
+        fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            panic!("unbounded read")
+        }
+        fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+            panic!("write")
+        }
+        fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let until = Instant::now() + Duration::from_secs(5);
+            while self.mode.load(Ordering::SeqCst) == 1 {
+                if filmcraft_media::cancel::cancelled() {
+                    return Some(Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled")));
+                }
+                assert!(Instant::now() < until, "test host release timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_ne!(self.mode.load(Ordering::SeqCst), 2, "injected worker panic");
+            self.source.reader(path)
+        }
+    }
+    fn session(mode: usize) -> (Session, ItemId, Arc<Host>) {
+        let (mut s, item, source) = analysis_image_session();
+        let host = Arc::new(Host { source, mode: AtomicUsize::new(mode), entered: AtomicUsize::new(0) });
+        s.services = host.clone();
+        (s, item, host)
+    }
+    fn wait_for(mut f: impl FnMut() -> bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !f() {
+            assert!(Instant::now() < until, "job did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn start(s: &mut Session, item: ItemId) -> u64 {
+        s.execute("media.analysis.inspect", json!({"item":item.0})).unwrap()["job"].as_u64().unwrap()
+    }
+    fn result(s: &mut Session, id: u64) -> Value {
+        s.execute("media.analysis.result", json!({"job":id})).unwrap()
+    }
+    fn finished(s: &mut Session, id: u64) -> Value {
+        wait_for(|| result(s, id)["finished"] == true);
+        result(s, id)
+    }
+    #[test]
+    fn analysis_queue_is_bounded_and_ids_are_shared() {
+        let (mut s, item, host) = session(1);
+        let existing = s.allocate_job_id().unwrap();
+        s.jobs.push(crate::Job { id: existing, label: "export fixture".into(), progress: Default::default(), result: Default::default() });
+        let active = start(&mut s, item);
+        wait_for(|| host.entered.load(Ordering::SeqCst) > 0);
+        let queued: Vec<_> = (0..8).map(|_| start(&mut s, item)).collect();
+        assert!(matches!(s.execute("media.analysis.inspect",json!({"item":item.0})),Err(crate::EngineError::Analysis(ref e)) if e.code=="ANALYSIS_BUSY"));
+        assert_eq!(s.execute("jobs.list", json!({})).unwrap().as_array().unwrap().len(), 10);
+        let next = s.allocate_job_id().unwrap();
+        assert!(existing < active && active < queued[0] && queued[7] < next);
+        host.mode.store(0, Ordering::SeqCst);
+        assert_eq!(finished(&mut s, active)["status"], "complete");
+        for id in queued {
+            assert_eq!(finished(&mut s, id)["status"], "complete");
+        }
+    }
+    #[test]
+    fn cancel_and_panic_leave_terminal_jobs() {
+        let (mut s, item, host) = session(1);
+        let active = start(&mut s, item);
+        wait_for(|| host.entered.load(Ordering::SeqCst) > 0);
+        let queued = start(&mut s, item);
+        s.execute("jobs.cancel", json!({"job":queued})).unwrap();
+        assert_eq!(finished(&mut s, queued)["status"], "cancelled");
+        s.execute("jobs.cancel", json!({"job":active})).unwrap();
+        assert_eq!(finished(&mut s, active)["status"], "cancelled");
+        assert_eq!(host.entered.load(Ordering::SeqCst), 1, "cancelled queued work must not open sources");
+        host.mode.store(2, Ordering::SeqCst);
+        let failed = start(&mut s, item);
+        assert_eq!(finished(&mut s, failed)["error"]["code"], "WORKER_PANIC");
+        host.mode.store(0, Ordering::SeqCst);
+        let good = start(&mut s, item);
+        assert_eq!(finished(&mut s, good)["status"], "complete");
+    }
+    #[test]
+    fn analysis_does_not_hold_session_lock_or_mutate_editor() {
+        let (s, item, host) = session(1);
+        let project = serde_json::to_value(&*s.project).unwrap();
+        let state = serde_json::to_value(&s.state).unwrap();
+        let history = (s.history.undo.len(), s.history.redo.len());
+        let session = Arc::new(Mutex::new(s));
+        let id = start(&mut session.lock().unwrap(), item);
+        wait_for(|| host.entered.load(Ordering::SeqCst) > 0);
+        let mut s = session.try_lock().expect("worker holds live session lock");
+        s.execute("project.inspect", json!({})).unwrap();
+        s.execute("jobs.list", json!({})).unwrap();
+        s.execute("jobs.cancel", json!({"job":id})).unwrap();
+        assert_eq!(finished(&mut s, id)["status"], "cancelled");
+        assert_eq!(serde_json::to_value(&*s.project).unwrap(), project);
+        assert_eq!(serde_json::to_value(&s.state).unwrap(), state);
+        assert_eq!((s.history.undo.len(), s.history.redo.len()), history);
+    }
+    #[test]
+    fn analysis_frame_job_keeps_images_out_of_job_listing() {
+        let (mut s, item, _) = session(0);
+        let response = s.execute("media.analysis.frames", json!({"item":item.0,"max_frames":2})).unwrap();
+        assert!(response.get("frames").is_none());
+        let id = response["job"].as_u64().unwrap();
+        let page = finished(&mut s, id);
+        assert_eq!(page["status"], "complete");
+        assert_eq!(page["frames"].as_array().unwrap().len(), 1);
+        assert!(page["frames"][0]["png_base64"].as_str().unwrap().starts_with("iVBOR"));
+        assert!(!s.execute("jobs.list", json!({})).unwrap().to_string().contains("png_base64"));
+    }
+}
+
+#[test]
+fn shared_job_allocator_does_not_reuse_or_wrap_ids() {
+    let mut session = Session::default();
+    assert_eq!(session.allocate_job_id().unwrap(), 1);
+    assert_eq!(session.allocate_job_id().unwrap(), 2);
+    session.jobs.push(crate::Job { id: 99, label: "external".into(), progress: Default::default(), result: Default::default() });
+    assert_eq!(session.allocate_job_id().unwrap(), 100);
+    session.jobs.clear();
+    assert_eq!(session.allocate_job_id().unwrap(), 101);
+    session.jobs.push(crate::Job { id: u64::MAX, label: "hostile".into(), progress: Default::default(), result: Default::default() });
+    assert!(session.allocate_job_id().is_err());
+}
+
+#[test]
+fn analysis_result_rejects_hostile_job_arguments() {
+    let mut session = Session::default();
+    for params in [json!({}), json!({"job":0}), json!({"job":-1}), json!({"job":1.5}), json!({"job":"1"}), json!({"job":1,"extra":true}), Value::Null] {
+        assert!(session.execute("media.analysis.result", params).is_err());
+    }
+    assert!(session.execute("media.analysis.result", json!({"job":1})).is_err());
+}

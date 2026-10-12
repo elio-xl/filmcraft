@@ -123,12 +123,12 @@ AE01 至 AE06 共享接口，默认按顺序实施；采用多执行者时须使
 
 **Interfaces:** Session 增加会话级 `AnalysisQueue`。公开 `media_analysis::inspect(session: &mut Session, params: &Value) -> crate::Result<Value>`、`frames(session: &mut Session, params: &Value) -> crate::Result<Value>` 启动任务；`result(session: &Session, params: &Value) -> crate::Result<Value>` 读取结果；`commands() -> Vec<CommandSpec>` 注册入口。
 
-- [ ] 写 `analysis_queue_is_bounded`：1 个阻塞中的活动任务加 8 个排队任务被接受，第 10 个请求返回繁忙错误；job ID 与导出任务不冲突。
-- [ ] 写 `cancel_and_panic_leave_terminal_jobs`：排队取消不开始解码，运行取消能结束，注入 panic 产生失败结果；之后新的请求成功。测试等待必须有超时，不能让测试永久阻塞。
-- [ ] 写 `analysis_does_not_hold_session_lock`：慢解码期间 `project.inspect`、`jobs.list` 和 `jobs.cancel` 仍能完成。先运行 `cargo test -p filmcraft-engine media_analysis::tests` 确认失败。
-- [ ] 为分析建立独立结果类型，不强塞进当前 `Job` 的导出 `Report`。扩展 `jobs.list` 合并元数据、扩展 `jobs.cancel` 路由，同一 ID 分配器分配两类任务；图片数据只经 `media.analysis.result` 读取。
-- [ ] 快照和排队在短锁内完成，源打开、哈希、解码在线程中完成。复用媒体取消机制，每帧和分块读取间检查取消，工作线程捕获 panic；终态结果使用受限缓存管理，不要求 UI 调用 poll 才能变成 finished。
-- [ ] 重跑分析及现有作业测试，运行 `cargo xtask ci`，提交 `AE04: Schedule cancellable media analysis jobs`。
+- [x] 写 `analysis_queue_is_bounded`：1 个阻塞中的活动任务加 8 个排队任务被接受，第 10 个请求返回繁忙错误；job ID 与导出任务不冲突。
+- [x] 写 `cancel_and_panic_leave_terminal_jobs`：排队取消不开始解码，运行取消能结束，注入 panic 产生失败结果；之后新的请求成功。测试等待必须有超时，不能让测试永久阻塞。
+- [x] 写 `analysis_does_not_hold_session_lock`：慢解码期间 `project.inspect`、`jobs.list` 和 `jobs.cancel` 仍能完成。先运行 `cargo test -p filmcraft-engine media_analysis::tests` 确认失败。
+- [x] 为分析建立独立结果类型，不强塞进当前 `Job` 的导出 `Report`。扩展 `jobs.list` 合并元数据、扩展 `jobs.cancel` 路由，同一 ID 分配器分配两类任务；图片数据只经 `media.analysis.result` 读取。
+- [x] 快照和排队在短锁内完成，源打开、哈希、解码在线程中完成。复用媒体取消机制，每帧和分块读取间检查取消，工作线程捕获 panic；终态结果使用受限缓存管理，不要求 UI 调用 poll 才能变成 finished。
+- [x] 重跑分析及现有作业测试，运行 `cargo xtask ci`，提交 `AE04: Schedule cancellable media analysis jobs`。
 
 ## AE05 内容版本与预算缓存
 

@@ -254,3 +254,18 @@ fn trim_delta_stops_at_the_end_of_the_media() {
     let back = commands::trim_delta(&s, clip, filmcraft_edit::Edge::Out, filmcraft_edit::TrimMode::Regular, -small).unwrap();
     assert_eq!(back, -small, "a trim within the media is not clamped");
 }
+
+#[test]
+fn analysis_job_control_does_not_commit_a_live_trim() {
+    let mut s = demo();
+    select_first_cut(&mut s, "roll");
+    s.execute("trim.shuttle", json!({"direction":"forward","clock":10.0})).unwrap();
+    s.execute("trim.tick", json!({"clock":10.5})).unwrap();
+    let before = (s.history.undo.len(), s.revision, s.playhead());
+    let id = s.allocate_job_id().unwrap();
+    s.jobs.push(crate::Job { id, label: "test job".into(), progress: Default::default(), result: Default::default() });
+    s.execute("jobs.list", json!({})).unwrap();
+    s.execute("jobs.cancel", json!({"job":id})).unwrap();
+    assert!(s.trim_play.dynamic.is_some(), "job control committed the unrelated live trim");
+    assert_eq!((s.history.undo.len(), s.revision, s.playhead()), before);
+}

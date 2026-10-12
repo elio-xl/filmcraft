@@ -376,9 +376,9 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"item": item.0, "clip": clip, "narration": n}))
 }
 
-fn new_job(s: &mut Session, label: String) -> crate::Job {
-    let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
-    crate::Job { id, label, progress: Default::default(), result: Default::default() }
+fn new_job(s: &mut Session, label: String) -> Result<crate::Job> {
+    let id = s.allocate_job_id()?;
+    Ok(crate::Job { id, label, progress: Default::default(), result: Default::default() })
 }
 
 fn spawn(s: &mut Session, job: crate::Job, wait: bool, name: &str, run: impl FnOnce() + Send + 'static) -> Result<u64> {
@@ -427,7 +427,7 @@ fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
     if s.tts_cache.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|(k, _)| *k == key) {
         return Ok(json!({"job": null, "cached": true}));
     }
-    let job = new_job(s, "Synthesizing narration".into());
+    let job = new_job(s, "Synthesizing narration".into())?;
     let (prog, res, cache) = (job.progress.clone(), job.result.clone(), s.tts_cache.clone());
     let wait = p.get("wait").and_then(Value::as_bool).unwrap_or(false);
     let id = spawn(s, job, wait, "filmcraft-tts", move || {
@@ -458,7 +458,7 @@ fn download_voices(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "natural voices are not available in this build (built without the `neural-voices` feature)"));
     }
     let wait = p.get("wait").and_then(Value::as_bool).unwrap_or(false);
-    let job = new_job(s, format!("Downloading {}", tts::catalog::PACKAGE_NAME));
+    let job = new_job(s, format!("Downloading {}", tts::catalog::PACKAGE_NAME))?;
     job.progress.total.store(tts::catalog::missing_bytes(&dir), std::sync::atomic::Ordering::Relaxed);
     let (prog, res) = (job.progress.clone(), job.result.clone());
     let id = spawn(s, job, wait, "filmcraft-tts-download", move || {

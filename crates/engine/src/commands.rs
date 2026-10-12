@@ -1289,10 +1289,13 @@ fn build() -> Vec<CommandSpec> {
             has_seq,
             crate::export_tools::export_media
         ),
-        query!("jobs.list", "List Jobs", "{}", |s, _| Ok(Value::Array(s.jobs.iter().map(crate::Job::to_json).collect()))),
+        query!("jobs.list", "List Jobs", "{}", |s, _| Ok(Value::Array(s.jobs.iter().map(crate::Job::to_json).chain(s.analysis.list()).collect()))),
         query!("perf.stats", "Performance Statistics", "{}", |s, _| Ok(crate::perf::stats(s))),
-        cmd!("jobs.cancel", "Cancel Job", [], None, r#"{"job":id}"#, always, |s, p| {
+        query!("jobs.cancel", "Cancel Job", r#"{"job":id}"#, |s, p| {
             let id = u64_p(p, "job").ok_or_else(|| bad("jobs.cancel", "need `job`"))?;
+            if s.analysis.cancel(id) {
+                return Ok(Value::Null);
+            }
             let j = s.jobs.iter().find(|j| j.id == id).ok_or_else(|| bad("jobs.cancel", "no such job"))?;
             j.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(Value::Null)
@@ -2953,6 +2956,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::project_panel::commands());
     v.extend(crate::media_browser::commands());
     v.extend(crate::paste_media::commands());
+    v.extend(crate::media_analysis::commands());
     // Edit ▸ Label ▸ <colour>, Paste Attributes, subclips, Video / Audio Options, Replace With Clip…
     // and their menu order
     crate::clip_ops::apply_layout(&mut v);
