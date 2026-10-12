@@ -252,3 +252,25 @@ Preflight changes neither the document nor editor state/history/revision and is 
 or an authorization token for a later apply. Read-only reports retain the latest 32 results
 (1 MiB each); up to 10,000 request receipts remain for the session, preventing silent replay
 of expired requests. A duplicate ID with different parameters returns `REQUEST_ID_CONFLICT`.
+
+`edit.plan.apply` uses the same plan schema but has a distinct request identity from validate.
+It computes an isolated candidate, then commits through the Session on UI polling or
+`edit.plan.result`. Polling an apply job can therefore perform its authorized commit.
+A successful result has `committed:true`, decimal `revision_before`/`revision_after` and
+`undo_label:"Apply Editing Plan"`. The complete plan produces one change event and one undo
+entry; undo/redo and recovery snapshots use the existing Session mechanisms.
+
+The final guard checks revision, project/service identity, editing context and source stamps.
+Concurrent user edits win. Changed active sequence/linked-selection/marker policy or conflicting
+selection changes return `CONTEXT_CHANGED`; unrelated playhead/navigation remains current.
+Cancellation, failed steps or worker panic discard the entire candidate. Ready candidates count
+against the nine-job limit. Interactive trim must finish before apply; exhausted revision space
+returns an error before changing the project.
+
+Full source SHA256 checks run in the worker. Apply additionally requires a host-provided cheap
+source identity/change stamp, retained verified source handles, and at most 256 file/directory
+stamps in the final check (image-sequence frames count individually). FsServices uses native
+identity/change metadata on Unix and creation/modification/length metadata elsewhere. A host
+without stamps returns `CAPABILITY_UNAVAILABLE` for file-backed apply; generator-only plans
+need none. These detect ordinary source replacement/changes between verification and commit;
+they are not filesystem locks against hostile concurrent writes after the last check.

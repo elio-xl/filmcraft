@@ -17,6 +17,9 @@ pub(super) struct SourceVersion {
     pub version: String,
 }
 pub(super) struct Plan {
+    pub apply: bool,
+    #[cfg(test)]
+    pub panic_after_step: Option<usize>,
     pub request_id: String,
     pub expected_revision: u64,
     pub sources: Vec<SourceVersion>,
@@ -140,7 +143,16 @@ pub(super) fn parse(p: &Value) -> Result<Plan> {
     if let Some(f) = canonical.as_object_mut() {
         f.remove("request_id");
     }
-    Ok(Plan { request_id, expected_revision, sources, steps, canonical })
+    Ok(Plan {
+        apply: false,
+        #[cfg(test)]
+        panic_after_step: None,
+        request_id,
+        expected_revision,
+        sources,
+        steps,
+        canonical,
+    })
 }
 fn parse_step(v: &Value) -> Result<Step> {
     let f = object(v, &["id", "params", "reason"])?;
@@ -423,6 +435,10 @@ pub(super) fn compute(snapshot: &Snapshot, plan: &Plan, verified: &BTreeMap<Item
             Ok(json!({"index":index,"id":step.id,"reason":step.reason,"status":"valid",
                 "affected_clips":affected.iter().take(1000).map(|id|id.0).collect::<Vec<_>>(),"affected_clip_count":affected.len()}))
         })();
+        #[cfg(test)]
+        if plan.panic_after_step == Some(index) {
+            panic!("injected isolated edit panic");
+        }
         reports.push(result.map_err(|e: EngineError| invalid(format!("step {index} ({}): {e}", step.id)))?);
     }
     let changed = project.items.iter().filter(|(id, item)| snapshot.project.items.get(id) != Some(*item)).map(|(id, _)| id.0).collect::<Vec<_>>();

@@ -186,3 +186,198 @@ fn hostile_plan_json_is_bounded() {
     assert!(super::validation::parse(&v).is_err());
     assert_eq!(snapshot(&s), before);
 }
+
+#[test]
+fn plan_commits_one_undo_step() {
+    let mut s = demo();
+    let mut p = plan(&mut s);
+    p["steps"][0]["params"]["delta"] = json!((-TPS / 25).to_string());
+    p["steps"] = json!(vec![p["steps"][0].clone(); 3]);
+    let original = serde_json::to_value(&*s.project).unwrap();
+    let undo = s.history.undo.len();
+    let rev = s.revision;
+    let events = s.events.len();
+    let result = run(&mut s, "edit.plan.apply", p);
+    assert_eq!(result["committed"], true, "{result}");
+    assert_eq!(s.history.undo.len(), undo + 1);
+    assert_eq!(s.revision, rev + 1);
+    assert_eq!(s.events[events..].iter().filter(|e| matches!(e, crate::Event::ProjectChanged { .. })).count(), 1);
+    let edited = serde_json::to_value(&*s.project).unwrap();
+    assert_ne!(edited, original);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&*s.project).unwrap(), original);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&*s.project).unwrap(), edited);
+}
+#[test]
+fn plan_failure_leaves_live_state_unchanged() {
+    let mut s = demo();
+    let mut p = plan(&mut s);
+    let before = snapshot(&s);
+    let mut bad = p["steps"][0].clone();
+    bad["params"]["clip"] = json!(u64::MAX);
+    p["steps"] = json!([p["steps"][0].clone(), bad]);
+    let result = run(&mut s, "edit.plan.apply", p);
+    assert_eq!(result["status"], "error");
+    assert!(result["error"]["message"].as_str().unwrap().contains("step 1"));
+    assert_eq!(snapshot(&s), before);
+}
+fn ready(s: &Session, job: &Value) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let page = s.edit_plans.result(job.as_u64().unwrap()).unwrap();
+        if page["status"] == "ready" {
+            break;
+        }
+        assert_ne!(page["finished"], true, "{page}");
+        assert!(Instant::now() < deadline, "{page}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+#[test]
+fn concurrent_user_edit_wins() {
+    let mut s = demo();
+    let p = plan(&mut s);
+    assert_eq!(run(&mut s, "edit.plan.validate", p.clone())["status"], "complete");
+    let mut p = p;
+    p["request_id"] = json!("apply-after-validate");
+    let ack = s.execute("edit.plan.apply", p).unwrap();
+    ready(&s, &ack["job"]);
+    s.execute("captions.add", json!({"text":"user edit"})).unwrap();
+    let before = snapshot(&s);
+    let result = wait(&mut s, "edit.plan.result", &ack["job"]);
+    assert_eq!(result["error"]["code"], "REVISION_MISMATCH", "{result}");
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn cancelled_ready_plan_does_not_commit() {
+    let mut s = demo();
+    let p = plan(&mut s);
+    let before = snapshot(&s);
+    let ack = s.execute("edit.plan.apply", p).unwrap();
+    ready(&s, &ack["job"]);
+    s.execute("jobs.cancel", json!({"job":ack["job"]})).unwrap();
+    assert_eq!(wait(&mut s, "edit.plan.result", &ack["job"])["status"], "cancelled");
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn changed_project_reference_discards_ready_plan() {
+    let mut s = demo();
+    let p = plan(&mut s);
+    let ack = s.execute("edit.plan.apply", p).unwrap();
+    ready(&s, &ack["job"]);
+    s.project = std::sync::Arc::new((*s.project).clone());
+    let before = snapshot(&s);
+    let result = wait(&mut s, "edit.plan.result", &ack["job"]);
+    assert_eq!(result["error"]["code"], "PROJECT_CHANGED", "{result}");
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn source_replaced_before_apply_is_rejected() {
+    let mut s = demo();
+    s.services = std::sync::Arc::new(crate::FsServices);
+    let clip = s.active_sequence().unwrap().video_tracks[0].items[0].clone();
+    let (root, _, _) = s.project.resolve_media(clip.item).unwrap();
+    let dir = crate::temp_dir().join(format!("filmcraft-plan-source-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("source.png");
+    let make = |color: &[u8]| {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::write_buffer_with_format(&mut out, &color.repeat(32), 8, 4, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    std::fs::write(&path, make(&[255, 0, 0, 255])).unwrap();
+    if let filmcraft_project::ItemKind::Media(m) = &mut std::sync::Arc::make_mut(&mut s.project).items.get_mut(&root).unwrap().kind {
+        m.media = filmcraft_project::MediaRef::File { path: path.to_str().unwrap().into() };
+        m.info.kind = filmcraft_media::MediaKind::Still;
+    } else {
+        panic!("demo media missing");
+    }
+    let p = plan(&mut s);
+    let before = snapshot(&s);
+    let ack = s.execute("edit.plan.apply", p).unwrap();
+    ready(&s, &ack["job"]);
+    let replacement = dir.join("replacement.png");
+    std::fs::write(&replacement, make(&[0, 255, 0, 255])).unwrap();
+    std::fs::rename(replacement, &path).unwrap();
+    let result = wait(&mut s, "edit.plan.result", &ack["job"]);
+    assert_eq!(result["error"]["code"], "SOURCE_CHANGED", "{result}");
+    assert_eq!(snapshot(&s), before);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn plan_graphic_edits_keep_shared_instances_synchronized() {
+    let mut s = demo();
+    s.execute("graphics.newText", json!({"text":"original","newClip":true,"time":600*TPS})).unwrap();
+    let clip = s.state.selection[0];
+    let item = s.execute("graphics.upgradeToSourceGraphic", json!({"clip":clip.0})).unwrap()["item"].as_u64().unwrap();
+    let track = s.active_sequence().unwrap().find_item(clip).unwrap().0;
+    s.execute("timeline.move", json!({"moves":[{"clip":clip.0,"track":track.0,"time":610*TPS}],"copy":true})).unwrap();
+    let p = json!({"request_id":"graphic-plan","expected_revision":s.revision.to_string(),"source_versions":[],"steps":[{"id":"graphics.set","params":{"clip":clip.0,"layer":0,"time":(600*TPS).to_string(),"props":{"text":"shared replacement"}},"reason":"shared title"}]});
+    let result = run(&mut s, "edit.plan.apply", p);
+    assert_eq!(result["committed"], true, "{result}");
+    let layers = &s.project.source_graphics[&filmcraft_project::ItemId(item)].layers;
+    let copies = s.active_sequence().unwrap().all_tracks().flat_map(|t| &t.items).filter(|c| c.item.0 == item).collect::<Vec<_>>();
+    assert_eq!(copies.len(), 2);
+    for c in copies {
+        assert_eq!(&c.effects.iter().filter(|e| filmcraft_project::graphic::is_layer(e)).cloned().collect::<Vec<_>>(), layers);
+    }
+    assert!(serde_json::to_string(layers).unwrap().contains("shared replacement"));
+}
+
+#[test]
+fn isolated_step_panic_never_reaches_live_state() {
+    let mut s = demo();
+    let mut p = plan(&mut s);
+    p["steps"] = json!(vec![p["steps"][0].clone(); 3]);
+    let before = snapshot(&s);
+    s.edit_plans.inject_panic(1);
+    let result = run(&mut s, "edit.plan.apply", p);
+    assert_eq!(result["error"]["code"], "WORKER_PANIC", "{result}");
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn apply_preserves_new_playhead_and_rejects_overflow() {
+    let mut s = demo();
+    let p = plan(&mut s);
+    let ack = s.execute("edit.plan.apply", p).unwrap();
+    ready(&s, &ack["job"]);
+    s.execute("playhead.set", json!({"seconds":123})).unwrap();
+    let playhead = s.playhead();
+    let result = wait(&mut s, "edit.plan.result", &ack["job"]);
+    assert_eq!(result["committed"], true, "{result}");
+    assert_eq!(s.playhead(), playhead);
+    s.revision = u64::MAX;
+    let mut p = plan(&mut s);
+    p["request_id"] = json!("overflow");
+    let before = snapshot(&s);
+    assert_eq!(run(&mut s, "edit.plan.apply", p)["error"]["code"], "RESOURCE_LIMIT");
+    assert_eq!(snapshot(&s), before);
+}
+#[test]
+fn committed_plan_uses_existing_recovery_snapshot() {
+    let dir = crate::temp_dir().join(format!("filmcraft-plan-recovery-{}", std::process::id()));
+    let mut s = demo();
+    let mut cfg = crate::autosave::AutosaveConfig::new(&dir);
+    cfg.journal_debounce = Duration::from_millis(10);
+    s.start_autosave(cfg.clone()).unwrap();
+    let p = plan(&mut s);
+    assert_eq!(run(&mut s, "edit.plan.apply", p)["committed"], true);
+    let edited = (*s.project).clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        s.poll_persistence();
+        if s.persistence.as_ref().unwrap().status.journaled_revision == s.revision {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    s.persistence.take().unwrap().simulate_crash();
+    let mut recovered = Session::default();
+    recovered.start_autosave(cfg).unwrap();
+    recovered.execute("file.recover", json!({})).unwrap();
+    assert_eq!(*recovered.project, edited);
+    recovered.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}

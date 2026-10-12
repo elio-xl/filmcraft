@@ -1,5 +1,6 @@
 //! A bounded cooperative plan worker. It cannot acquire the live Session.
-use super::validation::{Candidate, Plan, Snapshot};
+use super::transaction::{Guard, Ready};
+use super::validation::{Plan, Snapshot};
 use crate::media_analysis::{
     cache,
     source::{AnalysisInput, check_cancelled, failure},
@@ -22,10 +23,13 @@ struct Job {
     finished: bool,
     status: String,
     result: Option<Value>,
+    ready: Option<Ready>,
 }
 #[derive(Default)]
 struct State {
     worker: bool,
+    #[cfg(test)]
+    panic_after_step: Option<usize>,
     active: Option<u64>,
     pending: VecDeque<Work>,
     jobs: BTreeMap<u64, Job>,
@@ -61,7 +65,7 @@ impl PlanQueue {
         if let Some(reply) = lookup(&state, &plan)? {
             return Ok(reply);
         }
-        if state.pending.len() + usize::from(state.active.is_some()) >= 9 {
+        if state.jobs.values().filter(|j| !j.finished).count() >= 9 {
             return Err(failure("PLAN_BUSY", "one plan is active and eight are queued", true));
         }
         if state.jobs.len() >= 10000 {
@@ -74,8 +78,21 @@ impl PlanQueue {
         state.receipts.insert(plan.request_id.clone(), (cache::key(&plan.canonical)?, id));
         state.jobs.insert(
             id,
-            Job { request_id: plan.request_id.clone(), cancel: Arc::new(AtomicBool::new(false)), finished: false, status: "queued".into(), result: None },
+            Job {
+                request_id: plan.request_id.clone(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                finished: false,
+                status: "queued".into(),
+                result: None,
+                ready: None,
+            },
         );
+        #[cfg(test)]
+        let plan = {
+            let mut plan = plan;
+            plan.panic_after_step = state.panic_after_step.take();
+            plan
+        };
         state.pending.push_back(Work { id, plan, snapshot, inputs });
         if !state.worker {
             state.worker = true;
@@ -98,6 +115,10 @@ impl PlanQueue {
             }
         }
         Ok(reply)
+    }
+    #[cfg(test)]
+    pub(super) fn inject_panic(&self, step: usize) {
+        self.inner.lock().unwrap().panic_after_step = Some(step);
     }
     pub fn result(&self, id: u64) -> Result<Value> {
         let state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
@@ -124,6 +145,9 @@ impl PlanQueue {
             return true;
         }
         job.cancel.store(true, Ordering::Relaxed);
+        if state.jobs.get_mut(&id).is_some_and(|j| j.ready.take().is_some()) {
+            finish(&mut state, id, Err(failure("CANCELLED", "candidate discarded", false)));
+        }
         if let Some(index) = state.pending.iter().position(|w| w.id == id) {
             state.pending.remove(index);
             finish(&mut state, id, Err(failure("CANCELLED", "plan cancelled before computation", false)));
@@ -138,11 +162,25 @@ impl Drop for PlanQueue {
         }
     }
 }
-fn process(work: Work, cancel: &Arc<AtomicBool>) -> Result<Value> {
+enum Output {
+    Report(Value),
+    Ready(Box<Ready>),
+}
+fn process(work: Work, cancel: &Arc<AtomicBool>) -> Result<Output> {
     let mut verified = BTreeMap::new();
     let mut opened = Vec::new();
+    let mut guards = Vec::new();
+    let mut paths = 0usize;
     for (input, expected) in work.inputs.into_iter().zip(&work.plan.sources) {
         check_cancelled()?;
+        if work.plan.apply {
+            let guard = Guard::capture(&input)?;
+            paths = paths.saturating_add(guard.len());
+            if paths > 256 {
+                return Err(failure("RESOURCE_LIMIT", "apply source path budget exceeds 256", false));
+            }
+            guards.push(guard);
+        }
         let version = cache::input_version(&input, cancel)?;
         if version != expected.version {
             return Err(failure("VERSION_MISMATCH", format!("source item {} changed; inspect and rebuild the plan", expected.item.0), false));
@@ -151,15 +189,21 @@ fn process(work: Work, cancel: &Arc<AtomicBool>) -> Result<Value> {
         verified.insert(source.root_item, source.source_duration);
         opened.push((source, version));
     }
-    let Candidate { project, state, report } = super::validation::compute(&work.snapshot, &work.plan, &verified)?;
-    drop((project, state));
-    for (source, version) in opened {
-        if cache::source_version(&source, cancel)? != version {
+    let candidate = super::validation::compute(&work.snapshot, &work.plan, &verified)?;
+    for (source, version) in &opened {
+        if cache::source_version(source, cancel)? != *version {
             return Err(failure("SOURCE_CHANGED", "source changed during plan validation", true));
         }
     }
     check_cancelled()?;
-    Ok(report)
+    for guard in &guards {
+        guard.check()?;
+    }
+    if work.plan.apply {
+        Ok(Output::Ready(Box::new(Ready { snapshot: work.snapshot, candidate, guards, sources: opened.into_iter().map(|(s, _)| s).collect() })))
+    } else {
+        Ok(Output::Report(candidate.report))
+    }
 }
 fn worker(inner: &Arc<Mutex<State>>) {
     loop {
@@ -184,7 +228,16 @@ fn worker(inner: &Arc<Mutex<State>>) {
         })
         .unwrap_or_else(|_| Err(failure("WORKER_PANIC", "isolated editing failed; live project is unchanged", false)));
         let mut state = inner.lock().unwrap_or_else(PoisonError::into_inner);
-        finish(&mut state, id, result);
+        match result {
+            Ok(Output::Ready(ready)) => {
+                if let Some(job) = state.jobs.get_mut(&id) {
+                    job.ready = Some(*ready);
+                    job.status = "ready".into();
+                }
+            }
+            Ok(Output::Report(report)) => finish(&mut state, id, Ok(report)),
+            Err(error) => finish(&mut state, id, Err(error)),
+        }
         state.active = None;
     }
 }
@@ -192,7 +245,10 @@ fn finish(state: &mut State, id: u64, result: Result<Value>) {
     let Some(job) = state.jobs.get_mut(&id) else {
         return;
     };
-    let result = if job.cancel.load(Ordering::Relaxed) { Err(failure("CANCELLED", "plan cancelled; live project is unchanged", false)) } else { result };
+    job.ready = None;
+    let committed = result.as_ref().is_ok_and(|v| v["committed"] == true);
+    let result =
+        if !committed && job.cancel.load(Ordering::Relaxed) { Err(failure("CANCELLED", "plan cancelled; live project is unchanged", false)) } else { result };
     let result = result
         .and_then(|v| if cache::serialized_size(&v)? <= 1024 * 1024 { Ok(v) } else { Err(failure("RESOURCE_LIMIT", "plan report exceeds 1 MiB", false)) });
     let value = match result {
@@ -216,4 +272,24 @@ fn finish(state: &mut State, id: u64, result: Result<Value>) {
             job.result = None;
         }
     }
+}
+
+pub(super) fn poll(s: &mut crate::Session) {
+    let inner = s.edit_plans.inner.clone();
+    let mut state = inner.lock().unwrap_or_else(PoisonError::into_inner);
+    let ids = state.jobs.iter().filter(|(_, j)| j.ready.is_some()).map(|(id, _)| *id).collect::<Vec<_>>();
+    for id in ids {
+        let Some(job) = state.jobs.get_mut(&id) else { continue };
+        let Some(ready) = job.ready.take() else { continue };
+        let result = if job.cancel.load(Ordering::Relaxed) {
+            Err(failure("CANCELLED", "candidate discarded before commit", false))
+        } else {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::transaction::commit(s, ready)))
+                .unwrap_or_else(|_| Err(failure("COMMIT_FAILED", "unexpected error preparing commit", false)))
+        };
+        finish(&mut state, id, result);
+    }
+    drop(state);
+    s.sync_persistence();
+    s.previews.live.publish_project(s.project.clone());
 }

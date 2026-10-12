@@ -103,6 +103,11 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 /// Host services (file access, clipboard…) injected by the frontend.
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
+    /// Cheap identity/change token for transaction commit guards. Hosts must opt in; the
+    /// token must change for ordinary content edits and path replacement, without reading bytes.
+    fn source_stamp(&self, _path: &str) -> std::io::Result<String> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "host has no source change stamps"))
+    }
     /// Read at most `max_bytes` of a whole file, failing before allocating beyond that budget.
     /// Analysis uses this only without a random-access reader. Hosts must opt in: the default
     /// `file_size` itself reads the whole file, so it cannot safely enforce this contract.
@@ -164,6 +169,18 @@ pub trait Services: Send + Sync {
 /// Native filesystem services.
 pub struct FsServices;
 impl Services for FsServices {
+    fn source_stamp(&self, path: &str) -> std::io::Result<String> {
+        let m = std::fs::metadata(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(format!("{}:{}:{}:{}:{}:{}:{}", m.dev(), m.ino(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec(), m.len()))
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(format!("{:?}:{:?}:{}", m.created()?, m.modified()?, m.len()))
+        }
+    }
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
         std::fs::read(path)
     }
@@ -627,6 +644,7 @@ impl Session {
     /// Apply worker notifications (call regularly, e.g. once per UI frame). Also applies the
     /// results of finished proxy / ingest jobs.
     pub fn poll_persistence(&mut self) {
+        edit_plan::poll(self);
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);

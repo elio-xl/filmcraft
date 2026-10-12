@@ -40,8 +40,8 @@ pub struct AnalysisInput {
     name: String,
     interval: Option<TimeRange>,
     still_duration: Option<Tick>,
-    pub(super) identity: SourceIdentity,
-    pub(super) services: Arc<dyn Services>,
+    pub(crate) identity: SourceIdentity,
+    pub(crate) services: Arc<dyn Services>,
     openers: Vec<Opener>,
 }
 
