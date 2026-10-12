@@ -22,6 +22,8 @@ pub enum Request {
     Frames(AnalysisRequest),
     Preview(super::preview::Request),
     Shots(super::shots::Request),
+    Transcript(super::transcripts::Request),
+    Audio(super::transcripts::Request),
 }
 impl Request {
     fn request_id(&self) -> Option<&str> {
@@ -30,6 +32,7 @@ impl Request {
             Self::Frames(r) => r.request_id.as_deref(),
             Self::Preview(r) => r.request_id.as_deref(),
             Self::Shots(r) => r.request_id.as_deref(),
+            Self::Transcript(r) | Self::Audio(r) => r.request_id.as_deref(),
         }
     }
     fn expected_version(&self) -> Option<&str> {
@@ -38,6 +41,7 @@ impl Request {
             Self::Frames(r) => r.expected_version.as_deref(),
             Self::Preview(r) => r.expected_version.as_deref(),
             Self::Shots(r) => r.expected_version.as_deref(),
+            Self::Transcript(r) | Self::Audio(r) => r.expected_version.as_deref(),
         }
     }
     pub fn item(&self) -> filmcraft_project::ItemId {
@@ -46,6 +50,7 @@ impl Request {
             Self::Frames(r) => r.item,
             Self::Preview(r) => r.item,
             Self::Shots(r) => r.item,
+            Self::Transcript(r) | Self::Audio(r) => r.item,
         }
     }
     fn canonical(&self, include_version: bool) -> Result<Value> {
@@ -268,6 +273,8 @@ fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> R
         return Err(failure("VERSION_MISMATCH", "source content does not match expected_version; inspect again before editing", false));
     }
     let key = cache::key(&json!({"version":version,"request":work.request.canonical(false)?,"context":work.input.cache_context()}))?;
+    // Stored words may change independently of source content; preserve the submitted snapshot.
+    let key = if matches!(&work.request, Request::Transcript(_)) { format!("transcript-job:{}", work.id) } else { key };
     let cached = {
         let mut state = inner.lock().unwrap_or_else(PoisonError::into_inner);
         state.cache.get(&key).and_then(|page| {
@@ -300,6 +307,8 @@ fn process(work: Work, cancel: &Arc<AtomicBool>, inner: &Arc<Mutex<State>>) -> R
         Request::Inspect(_) => super::source::inspect(&source)?,
         Request::Frames(request) => super::frames::decode(&source, request)?,
         Request::Shots(request) => super::shots::analyse(&source, request)?,
+        Request::Transcript(request) => super::transcripts::transcript(&source, request)?,
+        Request::Audio(request) => super::transcripts::audio(&source, request)?,
         Request::Preview(request) => {
             let (mut value, bytes) = super::preview::generate(&source, request, cancel.clone())?;
             if let Some(bytes) = bytes {

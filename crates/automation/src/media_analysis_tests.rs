@@ -37,7 +37,7 @@ fn mcp_analysis_returns_images_and_metadata() {
 #[test]
 fn media_analysis_tool_schemas_are_read_only_and_strict() {
     let mcp = FilmcraftMcp::headless(Session::default());
-    for name in ["media_inspect", "media_frames", "media_preview_clip", "media_shots", "media_analysis_result"] {
+    for name in ["media_inspect", "media_frames", "media_preview_clip", "media_shots", "media_transcript", "media_analysis_result"] {
         let tool = serde_json::to_value(mcp.tool_router.get(name).expect("tool registered")).unwrap();
         assert_eq!(tool["annotations"]["readOnlyHint"], true);
         assert_eq!(tool["annotations"]["destructiveHint"], false);

@@ -208,3 +208,19 @@ hostile parameters, ten-minute coverage and the 1000-candidate cap. Existing `sc
 render `scene::tests` remain regression gates. The CLI preview acceptance above also calls the
 real `media_shots` MCP tool for seconds 2–6, expecting two candidates split at source second 4,
 and verifies the document/history still match their pre-analysis snapshots.
+
+## P1 AP03 source transcript and audio qualification
+
+`transcripts_tests` checks stored words without Whisper, root-time subclip overlaps, fresh data
+after a stored transcript changes, sample-exact silence spanning read blocks, nonfinite audio
+rejection, hostile request parameters and ten-minute partial coverage. The CLI preview scenario
+also reads a missing transcript, imports a word, queries its overlap through `media_transcript`,
+and measures an actual WAV through `command_run` plus `media_analysis_result` without changing
+subsequent document/history snapshots.
+
+The default build exercises read-only queries without speech inference. This host has no speech
+model installation in the FilmCraft data directory; optional model-backed recognition is **not
+verified**. No weights are downloaded. With locally installed weights and speech fixtures, the
+existing opt-in qualification is `cargo test -p filmcraft-speech --features whisper --test
+whisper_model -- --nocapture`, using `FILMCRAFT_MODELS_DIR` when needed; a SKIPPED message is not a
+recognition pass.

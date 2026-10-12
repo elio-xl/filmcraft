@@ -396,7 +396,28 @@ fn source_preview_video_and_png_fallback_round_trip() {
     client.run("file.newProject", json!({"name":"Source preview acceptance"}));
     let imported = metadata(&client.good("media_import", json!({"paths":[fixtures["videos"][0]["path"]]})));
     let item = imported["items"][0].as_u64().unwrap();
+    let absent = metadata(&client.good("media_transcript", json!({"item":item})));
+    assert_eq!(absent["availability"], "unavailable");
+    client.run("transcript.set", json!({"item":item,"transcript":{"source":"manual","language":"en","words":[{"text":"circle","start":TPS,"end":3*TPS}]}}));
+    let sound = metadata(&client.good("media_import", json!({"paths":[fixtures["audio"]]})))["items"][0].as_u64().unwrap();
     let before = (client.good("doc_inspect", json!({})), client.run("history.list", json!({})));
+    let words = metadata(&client.good("media_transcript", json!({"item":item,"start_ticks":(2*TPS).to_string(),"end_ticks":(4*TPS).to_string()})));
+    assert_eq!(words["words"][0]["text"], "circle");
+    assert_eq!(words["words"][0]["start_ticks"], TPS.to_string());
+    assert_eq!(words["words"][0]["overlap"]["start_ticks"], (2 * TPS).to_string());
+    let audio_job = client.run("media.analysis.audio", json!({"item":sound,"start_ticks":"0","end_ticks":(2*TPS).to_string()}));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let audio = metadata(&client.good("media_analysis_result", json!({"job":audio_job["job"]})));
+        if audio["finished"] == true {
+            assert_eq!(audio["loudness"]["availability"], "available");
+            assert!(audio["silence_ranges"].as_array().unwrap().is_empty());
+            assert_eq!(audio["rhythm"]["availability"], "unavailable");
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let started = Instant::now();
     let fallback = client.good("media_preview_clip", json!({"item":item,"start_ticks":(2*TPS).to_string(),"end_ticks":(6*TPS).to_string(),"max_side":160}));
     let meta = metadata(&fallback);

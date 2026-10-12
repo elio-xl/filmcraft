@@ -7,6 +7,7 @@ pub mod preview;
 pub mod request;
 pub mod shots;
 pub mod source;
+pub mod transcripts;
 
 /// Machine-readable failure shared by analysis jobs and per-frame results.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
@@ -56,6 +57,26 @@ pub fn result(session: &crate::Session, params: &serde_json::Value) -> crate::Re
 pub fn commands() -> Vec<crate::CommandSpec> {
     use crate::commands::{CommandSpec, always};
     vec![
+        CommandSpec {
+            id: "media.analysis.transcript",
+            label: "Read Source Transcript",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"request_id":str?,"expected_version":str?,"start_ticks":str?,"end_ticks":str?}"#,
+            enabled: always,
+            run: transcripts::start,
+            journal: false,
+        },
+        CommandSpec {
+            id: "media.analysis.audio",
+            label: "Measure Source Audio",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"request_id":str?,"expected_version":str?,"start_ticks":str?,"end_ticks":str?,"threshold_db":number?,"min_duration_ticks":str?}"#,
+            enabled: always,
+            run: transcripts::start_audio,
+            journal: false,
+        },
         CommandSpec {
             id: "media.analysis.shots",
             label: "Find Source Shot Candidates",
@@ -134,3 +155,6 @@ mod preview_tests;
 
 #[cfg(test)]
 mod shots_tests;
+
+#[cfg(test)]
+mod transcripts_tests;

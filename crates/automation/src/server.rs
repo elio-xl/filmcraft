@@ -263,6 +263,28 @@ pub struct MediaShotsParams {
     pub min_shot_frames: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MediaTranscriptParams {
+    /// Imported project item ID.
+    pub item: u64,
+    /// Wait for completion, default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+    /// Retry receipt; reuse only for identical parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Required SHA256 source version, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+    /// Source range start, decimal Tick string; supply with end_ticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ticks: Option<String>,
+    /// Exclusive source end; intersecting words retain their full source boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ticks: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisResultParams {
@@ -560,6 +582,16 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Read source transcript",
+        description = "Read stored word-level transcript with root-source times, overlap ranges, language, speakers and confidence. Works without Whisper. Missing data returns unavailable with explicit import/generate actions; never downloads a model or generates speech automatically. Decimal Tick strings.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn media_transcript(&self, Parameters(p): Parameters<MediaTranscriptParams>) -> Result<CallToolResult, McpError> {
+        let params = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        Ok(self.run_analysis("media.analysis.transcript", params, None).await.unwrap_or_else(fail))
+    }
+
+    #[tool(
         title = "Read source analysis job",
         description = "Poll a media analysis job. Returns status, metadata and completed PNG image blocks; expired results fail explicitly.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -790,6 +822,7 @@ impl ServerHandler for FilmcraftMcp {
             "media_frames" => Some("media.analysis.frames"),
             "media_preview_clip" => Some("media.analysis.preview"),
             "media_shots" => Some("media.analysis.shots"),
+            "media_transcript" => Some("media.analysis.transcript"),
             _ => None,
         } {
             let params = Value::Object(request.arguments.clone().unwrap_or_default());

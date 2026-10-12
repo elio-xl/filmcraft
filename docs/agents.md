@@ -431,3 +431,32 @@ One page scans at most ten minutes / 72000 samples and returns at most 1000 cand
 `covered_ranges`, `missing_ranges`, `remaining_ranges` and `errors`; resume uncovered ranges explicitly.
 Decode failures split coverage: the detector never infers continuity across a missing interval.
 No timeline cuts, selection, playhead changes or undo entries are created.
+
+### Stored transcripts and audio (P1)
+
+`media_transcript` / `media.analysis.transcript` reads a snapshot of stored words even in builds
+without Whisper. Supply `item` and optional paired source `start_ticks` / `end_ticks`, plus the
+usual version, receipt and MCP wait fields. Words keep their complete root-source boundaries;
+`overlap` records the portion inside the query. Language, speaker labels, confidence and the
+stored producer are returned without rewriting the transcript. A page holds at most 10000 words
+and 1 MiB of word text; use `remaining_ranges` to continue. Stored transcripts exceeding 100000
+words or bounded metadata limits fail explicitly. A fresh request observes updated stored words;
+a retry with the same request ID returns its original snapshot.
+
+Missing transcripts return `availability: unavailable` and import/generate action templates.
+`transcript.set` imports supplied words; `transcript.generate` retains its existing explicit
+capability/model checks and synchronous behavior. Queries never download models, call cloud
+services, or start transcription. Build support for generation does not imply installed weights.
+
+`command_run` with `media.analysis.audio` starts a cancellable query of primary audio stream 0.
+Its additional parameters are `threshold_db` (−120 through 0, default −40) and
+`min_duration_ticks` (positive, at most ten minutes; default `127008000000`, half a second).
+Silence means every channel's absolute sample amplitude stays below the threshold; runs merge
+across 4096-sample read blocks. Exact sample indices are decimal strings, with corresponding
+Tick times and sample rate. `analysed_range` contains complete samples within the request; any
+fractional edge sample is excluded. At most ten minutes are scanned; longer requests return
+`remaining_ranges`. Supported formats are 8–192 kHz and 1–8 channels, with at most 10000 silence
+ranges per query. Invalid decoded sample geometry or nonfinite samples fail rather than becoming
+silence. Loudness reuses the streaming BS.1770-4 / EBU R128 meter with its default channel weights;
+`integrated_lufs: null` plus `below_gate: true` means no signal passed the loudness gates.
+Rhythm extraction is explicitly unavailable in this endpoint.
