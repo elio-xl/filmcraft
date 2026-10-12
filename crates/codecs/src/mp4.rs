@@ -469,6 +469,16 @@ impl MediaSource for Mp4Source {
     fn analysis_support(&self) -> Result<(), MediaError> {
         let ti = self.vtrack.ok_or(MediaError::NoStream("video"))?;
         let track = self.file.tracks.get(ti).ok_or(MediaError::NoStream("video"))?;
+        // Analysis promises display geometry, while the existing preview path deliberately
+        // ignores mirrors/scales/shears. Admit only the quarter turns the GOP cache applies.
+        let [a, b, u, c, d, v, _, _, w] = track.matrix;
+        if u != 0
+            || v != 0
+            || w != 0x4000_0000
+            || !matches!((a, b, c, d), (0x10000, 0, 0, 0x10000) | (0, 0x10000, -0x10000, 0) | (-0x10000, 0, 0, -0x10000) | (0, -0x10000, 0x10000, 0))
+        {
+            return Err(MediaError::Unsupported("analysis supports only unscaled quarter-turn display matrices".into()));
+        }
         // The demuxer's edit_offset models leading empty edits and one unit-rate media edit.
         // Other edit programs need a piecewise mapping; never report guessed source times.
         let mut media_edit = false;
@@ -1018,6 +1028,25 @@ mod tests {
             let f = s.video_frame(FrameRequest::full(Tick::ZERO)).expect("frame");
             assert_eq!((f.width, f.height), (64, 32), "{c:?}");
         }
+    }
+
+    #[test]
+    fn analysis_rejects_unmodelled_display_transforms() {
+        const ONE: i32 = 0x10000;
+        const W: i32 = 0x4000_0000;
+        for matrix in [
+            [-ONE, 0, 0, 0, ONE, 0, 64 * ONE, 0, W], // mirror
+            [2 * ONE, 0, 0, 0, ONE, 0, 0, 0, W],     // unequal axis scale
+            [ONE, ONE / 2, 0, 0, ONE, 0, 0, 0, W],   // shear
+            [ONE, 0, 1, 0, ONE, 0, 0, 0, W],         // perspective
+        ] {
+            let source = Mp4Source::open("transform.mov", rotated_mov(matrix)).unwrap();
+            assert!(source.analysis_support().is_err(), "unsupported display transform must be discoverable");
+            assert!(matches!(source.analysis_frame(FrameRequest::full(Tick::ZERO)), Err(MediaError::Unsupported(_))));
+        }
+        let source = Mp4Source::open("rotated.mov", rotated_mov([0, ONE, 0, -ONE, 0, 0, 32 * ONE, 0, W])).unwrap();
+        let frame = source.analysis_frame(FrameRequest::full(Tick::ZERO)).unwrap();
+        assert_eq!((frame.width, frame.height, frame.pts), (32, 64, Tick::ZERO));
     }
 
     #[test]

@@ -175,12 +175,12 @@ AE01 至 AE06 共享接口，默认按顺序实施；采用多执行者时须使
 
 **Interfaces:** 产出可复用的连接步骤、模型看图记录和 AC01 至 AC11 验收表；不新增产品 API。
 
-- [ ] 准备两套配置：Headless 启动 `filmcraft-cli mcp`；Bridge 先启动 `filmcraft --control 9876`，再连接 `filmcraft-cli mcp --bridge 127.0.0.1:9876`。Codex 使用绝对二进制路径，示例不硬编码本机用户名，不改现有 Claude 的 .mcp.json。
-- [ ] 在实际 Codex 客户端调用 `media_frames`，让模型判断夹具场景切换和帧编号，人工对照确定性夹具验证。记录客户端版本、模型、工具调用、实际图像内容及判断结果；只展示文件路径不算 AC04 通过。
-- [ ] 执行恶意参数和媒体变异测试：截断、位翻转、伪造尺寸、空流、坏 PTS、循环项目引用；在 catch_unwind 下断言不 panic，并确认之后仍能正常查询和保存工程。新增导致崩溃的样本成为最小回归测试。
-- [ ] 记录固定硬件、素材、首帧和批量耗时、峰值内存、响应大小、缓存命中耗时、全量哈希耗时。逐条填写 AC01 至 AC11 为通过或未通过，不用估计值填充测量结果。
-- [ ] 执行 `cargo fmt --check`、相关模块测试及 `cargo xtask ci`，确认已有导出、撤销、转录和 wasm 分层仍通过；未通过项先修复再发布。
-- [ ] 提交 `AE08: Document and qualify Codex editing workflow`。若准备 PR，按 contributors 规则核对当前贡献者条目；不手改生成的 contributors.json。
+- [x] 准备两套配置：Headless 启动 `filmcraft-cli mcp`；Bridge 先启动 `filmcraft --control 9876`，再连接 `filmcraft-cli mcp --bridge 127.0.0.1:9876`。Codex 使用绝对二进制路径，示例不硬编码本机用户名，不改现有 Claude 的 .mcp.json。
+- [x] 在实际 Codex 客户端调用 `media_frames`，让模型判断夹具场景切换和帧编号，人工对照确定性夹具验证。记录客户端版本、模型、工具调用、实际图像内容及判断结果；只展示文件路径不算 AC04 通过。 实际采用当前 Codex 会话接收真实 stdio MCP 图片块并对照确定性夹具；未进行人工签字或持久化原生 MCP 注册测试，具体模型部署标识不可获得，边界见验收记录。
+- [x] 执行恶意参数和媒体变异测试：截断、位翻转、伪造尺寸、空流、坏 PTS、循环项目引用；在 catch_unwind 下断言不 panic，并确认之后仍能正常查询和保存工程。新增导致崩溃的样本成为最小回归测试。
+- [x] 记录固定硬件、素材、首帧和批量耗时、峰值内存、响应大小、缓存命中耗时、全量哈希耗时。逐条填写 AC01 至 AC11 为通过或未通过，不用估计值填充测量结果。
+- [x] 执行 `cargo fmt --check`、相关模块测试及 `cargo xtask ci`，确认已有导出、撤销、转录和 wasm 分层仍通过；未通过项先修复再发布。
+- [x] 提交 `AE08: Document and qualify Codex editing workflow`。若准备 PR，按 contributors 规则核对当前贡献者条目；不手改生成的 contributors.json。
 
 ## 覆盖检查与交付状态
 

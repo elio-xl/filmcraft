@@ -1,6 +1,6 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (new file: ROADMAP's "Where we are lacking" re-measured against Premiere Pro 26.5.2 and the open issue list) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (G6: generated-media MCP workflow qualified; real-world corpus still missing) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -19,7 +19,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | G3 | 10-bit and 4:2:2 camera media needs hardware | codec | yes | 30–50 h |
 | G4 | Crashes at start-up, and no test CI on pull requests | stability | yes | 40–80 h |
 | G5 | Hardware acceleration is partial | hardware | partly | 120–200 h |
-| G6 | No real-world media corpus or workflow acceptance tests | measurement | yes | 40–70 h |
+| G6 | No real-world media corpus; limited workflow acceptance tests | measurement | yes | 40–70 h |
 | G7 | No measured parity tool in CI | measurement | no | 10–20 h |
 | G8 | UI fidelity: monitor handles, Effect Controls, docking | UI / UX | partly | 120–200 h |
 | G9 | Windows and Linux at run time | platforms | partly | 50–90 h |
@@ -108,12 +108,18 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 - **Estimate:** 120–200 h (hardware we don't own needs a human). Doc:
   [hardware-parity.md](hardware-parity.md).
 
-## G6. No real-world media corpus or workflow acceptance tests
+## G6. No real-world media corpus; limited workflow acceptance tests
+
+- **Done (2026-10-12):** a deterministic 30-second MCP import → source thumbnails → edit/title/music →
+  save/reopen → original-resolution export scenario passes through both Headless and a real desktop
+  Bridge, with generated ProRes/PNG/WAV media, source-time mapping, read-only snapshots and batch
+  failure/undo recovery. See [qualification](testing/agent-video-editing.md) and
+  `apps/filmcraft-cli/tests/agent_editing.rs`. This covers one generated-media workflow.
 
 - **Missing:** a pinned corpus of phone, camera and screen recordings (variable frame rate,
   damaged files, long GOP, odd containers, multi-track audio), each with an import → edit → export
-  round trip checked against an ffprobe / ffmpeg oracle; scripted MCP sessions that do real jobs
-  end to end.
+  round trip checked against an ffprobe / ffmpeg oracle; broader scripted MCP workflows on those
+  real-world inputs.
 - **Evidence:** export stopped producing frames with iPhone HEVC clips on Linux (#480); WebM shows
   black (#432); only the first audio track imported (#397, #416, #601; multi-stream support landed
   in #361, reporters not yet confirmed); bitrate target produced 6.1 Mb/s for 40 (#371).
@@ -260,4 +266,5 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | G6 now has a generated-media MCP acceptance scenario in Headless and real desktop Bridge; no real-world corpus or readiness score is claimed |
 | 2026-10-10 | major | Created from ROADMAP.md's "Where we are lacking" (2026-10-05); re-ranked against Premiere 26.5.2 and the 188 open issues; added `.prproj`, 10-bit / 4:2:2 camera decode, launch crashes and missing PR CI, localization, delivery formats |

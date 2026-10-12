@@ -37,6 +37,23 @@ claude mcp add filmcraft-headless -- /abs/path/filmcraft/target/release/filmcraf
 { "mcpServers": { "filmcraft": { "command": "/abs/path/filmcraft-cli", "args": ["mcp", "--bridge", "127.0.0.1:9876"] } } }
 ```
 
+### Connect Codex
+
+Build the CLI, then register either mode using its absolute path (replace the example path).
+The command shape is verified against the bundled `codex mcp add --help`; these are setup commands
+for your machine, not changes to this repository's Claude `.mcp.json`.
+
+```sh
+codex mcp add filmcraft-headless -- /absolute/path/filmcraft-cli mcp
+codex mcp add filmcraft-bridge -- /absolute/path/filmcraft-cli mcp --bridge 127.0.0.1:9876
+```
+
+For Bridge, first start `/absolute/path/filmcraft --control 9876`. Use a fresh Codex session after
+registration. Start with `media_import`, `media_inspect`, and `media_frames`; use `wait=false` and
+`media_analysis_result` for large inputs. The server supplies images as MCP image content blocks;
+it does not require the model to open local file paths. Model/transport qualification and its
+limits are recorded in [agent video editing qualification](testing/agent-video-editing.md).
+
 ### From an installed release
 
 The release packages ship `filmcraft-cli` alongside the desktop app, so no build is needed:
@@ -111,7 +128,7 @@ Use `media_import`, then `media_inspect {item}` and `media_frames {item}`. The a
 leave the project, playhead, selection, history and active trims unchanged. `readOnlyHint` refers
 to project and source files: analysis still creates background jobs and an in-memory cache.
 The decoder's `analysis_capabilities.frames` indicates verified presentation-time support;
-an individual corrupt frame can still fail. Short video output is not implemented in P0.
+an individual corrupt frame can still fail. Short video output is not implemented in P0. MP4/MOV analysis supports unscaled quarter-turn display matrices; mirrors, scales, shear, perspective and complex edit lists are explicitly unsupported.
 
 ```json
 {"item":12,"strategy":"uniform","start_ticks":"0","end_ticks":"2540160000000","max_frames":8,"max_side":512,"wait":true}

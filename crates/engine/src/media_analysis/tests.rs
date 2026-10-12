@@ -915,3 +915,76 @@ mod versioned_analysis {
         assert_eq!(counted.1.load(Ordering::SeqCst), 5, "cache hit must hash twice without decoding the source again");
     }
 }
+
+#[test]
+fn analysis_media_mutations_leave_session_queryable_and_saveable() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("filmcraft-analysis-mutations-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("source.png");
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::write_buffer_with_format(&mut png, &[255; 8 * 4 * 4], 8, 4, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).unwrap();
+    let png = png.into_inner();
+    std::fs::write(&path, &png).unwrap();
+    let mut session = Session::default();
+    let item = crate::commands::import_bytes(&mut session, path.to_str().unwrap(), png.clone().into(), None).unwrap();
+    let original = serde_json::to_value(&*session.project).unwrap();
+    let history = session.history.undo.len();
+    let mut mutations = Vec::new();
+    for length in (0..png.len()).step_by(7) {
+        mutations.push(png[..length].to_vec());
+    }
+    for offset in (0..png.len()).step_by(5) {
+        let mut changed = png.clone();
+        changed[offset] ^= 0x80;
+        mutations.push(changed);
+    }
+    let mut huge = png.clone();
+    huge[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+    huge[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+    let mut crc = !0u32;
+    for &byte in &huge[12..29] {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb88320 } else { crc >> 1 };
+        }
+    }
+    huge[29..33].copy_from_slice(&(!crc).to_be_bytes());
+    mutations.push(huge);
+    for bytes in mutations {
+        std::fs::write(&path, &bytes).unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let ack = session.execute("media.analysis.frames", json!({"item":item.0,"max_frames":1})).unwrap();
+            let started = web_time::Instant::now();
+            loop {
+                let page = session.execute("media.analysis.result", json!({"job":ack["job"]})).unwrap();
+                if page["finished"] == true {
+                    break page;
+                }
+                assert!(started.elapsed() < Duration::from_secs(5));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }));
+        let page = outcome.expect("hostile media must not panic");
+        assert_ne!(page["error"]["code"], "WORKER_PANIC");
+        assert!(session.execute("project.inspect", json!({})).is_ok());
+    }
+    std::fs::write(&path, &png).unwrap();
+    let ack = session.execute("media.analysis.frames", json!({"item":item.0,"max_frames":1})).unwrap();
+    let started = web_time::Instant::now();
+    loop {
+        let page = session.execute("media.analysis.result", json!({"job":ack["job"]})).unwrap();
+        if page["finished"] == true {
+            assert_eq!(page["status"], "complete");
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(serde_json::to_value(&*session.project).unwrap(), original);
+    assert_eq!(session.history.undo.len(), history);
+    let saved = dir.join("still-usable.fcproj");
+    session.execute("file.saveAs", json!({"path":saved})).unwrap();
+    assert!(saved.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
