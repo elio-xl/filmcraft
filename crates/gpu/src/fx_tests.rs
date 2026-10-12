@@ -85,19 +85,47 @@ fn picture(w: u32, h: u32) -> Vec<f32> {
 
 /// Max |cpu − gpu| (finite values required) and the share of values off by more than 0.02.
 fn compare(cpu: &[f32], gpu: &[f32]) -> (f32, f64) {
+    compare_with_cutoff(cpu, gpu, 0.02)
+}
+
+fn compare_with_cutoff(cpu: &[f32], gpu: &[f32], cutoff: f32) -> (f32, f64) {
     assert_eq!(cpu.len(), gpu.len());
     let mut worst = 0f32;
     let mut flips = 0usize;
     for (a, b) in cpu.iter().zip(gpu) {
         assert!(b.is_finite(), "non-finite GPU value");
         let d = (a - b).abs() / (1.0 + a.abs());
-        if d > 0.02 {
+        if d > cutoff {
             flips += 1;
         } else {
             worst = worst.max(d);
         }
     }
     (worst, flips as f64 / cpu.len() as f64)
+}
+
+fn compare_steps(cpu: &[f32], gpu: &[f32]) -> (f32, f64) {
+    // Narrow threshold ramps amplify last-bit arithmetic differences. Every value outside
+    // EXACT counts against the same FLIPS budget: a smaller error must never be rejected
+    // where a larger threshold flip would pass. Non-threshold comparisons are unchanged.
+    compare_with_cutoff(cpu, gpu, EXACT)
+}
+
+#[test]
+fn threshold_error_accounting_is_monotonic() {
+    let cpu = vec![0.0; 1000];
+    for error in [EXACT * 2.0, 0.03, 1.0] {
+        let mut gpu = cpu.clone();
+        gpu[0] = error;
+        let (worst, outliers) = compare_steps(&cpu, &gpu);
+        assert_eq!(outliers, 0.001, "all deviations above EXACT count against the threshold-pixel allowance");
+        assert!(worst <= EXACT);
+        assert!(outliers <= FLIPS);
+        gpu[..11].fill(error);
+        assert!(compare_steps(&cpu, &gpu).1 > FLIPS, "the outlier allowance remains bounded");
+    }
+    let (worst, flips) = compare(&[0.0], &[EXACT * 2.0]);
+    assert!(worst > EXACT && flips == 0.0, "non-threshold effects retain the exact tolerance");
 }
 
 /// Effect cases: (effect id, parameters, whether a threshold may flip pixels).
@@ -320,7 +348,7 @@ fn gpu_effects_match_cpu_exactly() {
         op.apply(&mut cpu);
         let fx = LayerFx { size: (w, h), decimation: 1, ops: vec![op] };
         let (_, _, gpu) = c.effect_image(&frame, &fx).expect("effect image");
-        let (worst, flips) = compare(&cpu.px, &gpu);
+        let (worst, flips) = if steps { compare_steps(&cpu.px, &gpu) } else { compare(&cpu.px, &gpu) };
         eprintln!("{id} {params:?}: max rel diff {worst:.2e}, {:.3}% flipped", flips * 100.0);
         if worst > EXACT || flips > if steps { FLIPS } else { 0.0 } {
             failures.push(format!("{id} {params:?}: {worst:.2e}, flips {flips:.4}"));
